@@ -1,0 +1,23 @@
+# The Traditional Chinese (Taiwan) language files: fail when one is broken (a {fill} English does not have, a plural
+# without "other"), and list what an upstream update left untranslated or out of date (l10n/README.zh-TW.md).
+name: zh-TW language files
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node l10n/zh-TW.mjs check
