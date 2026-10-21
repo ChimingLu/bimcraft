@@ -17,6 +17,7 @@ macOS 沒有內建 PHP：`brew install php`（Windows：`winget install PHP.PHP.
 ```sh
 git clone https://github.com/ChimingLu/bimcraft.git
 cd bimcraft
+git checkout claude/project-thread-tf2rr8   # PR #1 合併到 main 之前需要這行
 npm run fetch-vendor
 
 # Windows PowerShell
