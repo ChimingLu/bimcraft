@@ -10,6 +10,7 @@ BimCraft 的「瀏覽器版」是一個純靜態檔案的資料夾。用 Edge �
 ## 需要
 
 Node.js 20.19 以上、PHP 8.1 以上、Git，以及 Microsoft Edge 或 Google Chrome。
+macOS 沒有內建 PHP：`brew install php`（Windows：`winget install PHP.PHP.8.4`）。
 
 ## 1. 產生繁中的瀏覽器版
 
@@ -24,17 +25,18 @@ $env:CC_LANG="zh-TW"; node devshell/edition.mjs
 CC_LANG=zh-TW node devshell/edition.mjs
 ```
 
-完成後會得到 `dist/bimcraft-browser-edition-vdev/`。`CC_LANG=zh-TW` 讓頁面直接以繁中產生
+完成後會得到 `dist/bimcraft-browser-edition-vdev/`（約 400 個檔案）。`CC_LANG=zh-TW` 讓頁面直接以繁中產生
 （瀏覽器版是預先產生好的頁面，不加這個就會是英文）。
 
 可以把這個資料夾搬到固定的位置，例如 `C:\BimCraft` 或 `~/BimCraft`。
 
 ## 2. 第一次開啟
 
-瀏覽器版不能直接雙擊 `index.html` 開啟，要經過一個本機伺服器。在該資料夾裡執行任一個：
+瀏覽器版不能直接雙擊 `index.html` 開啟，要經過一個本機伺服器。先進入產生的資料夾，再啟動伺服器
+（終端機視窗要保持開著）：
 
 ```sh
-python -m http.server 8000      # 或 python3
+cd dist/bimcraft-browser-edition-vdev
 php -S localhost:8000
 ```
 
