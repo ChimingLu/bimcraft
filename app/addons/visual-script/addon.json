@@ -1,0 +1,12 @@
+{
+  "id": "visual-script",
+  "name": "Visual script",
+  "version": "0.1.0",
+  "apps": ["bimcraft"],
+  "api": "1.1",
+  "license": "Apache-2.0",
+  "entry": "./main.js",
+  "lang": "./lang/",
+  "permissions": ["draw", "model"],
+  "description": "Build the model with a node graph: sliders, formulas and outlines wired into walls, floors, doors, windows, levels and grids. Run again to replace what the last run made."
+}
