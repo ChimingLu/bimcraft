@@ -9,6 +9,7 @@
  *
  *   modelTools(env) → [tool definitions] (DOM-free; the headless core and bin/test-bimcraft.mjs --draw06 run them)
  *     env = { ed() (an IfcEditor), apply(label, op) → Promise<op result> (one undo step "Assistant: <label>") }
+ *   drawEnv(modelUi, app, prefix) → { ed, apply, settle } (the live env; add-ons get one too: addons/bimcraft-api.js draw)
  *   installAgents(modelUi, app) → registers modelTools + the window's own tools on host.control (bimcraft.js calls it once)
  *     app = { control, model(), selection() → keys, select(keys), save() → Promise<bool>, undo() → Promise, busy() → null | what }
  *   describeModel(ed) · levelRef(ed, nameOrGuid)
@@ -172,24 +173,33 @@ export function modelTools(env) {
   ];
 }
 
-/** Registers the tools on this window's host.control (bimcraft.js calls it once, with the Draw module). */
-export function installAgents(modelUi, app) {
-  const C = app.control || getHost({ app: 'bimcraft' }).control;
+/**
+ * The env modelTools runs on in the live window: { ed, apply, settle, A } — each apply one undo step through the Draw module
+ * (the plan and the 3D view follow), labelled prefix + label ("Assistant: add 4 walls"). Add-ons get their own (bimcraft.js,
+ * addons/bimcraft-api.js draw), labelled with the add-on's name.
+ */
+export function drawEnv(modelUi, app, prefix = 'Assistant: ') {
   const A = modelUi.extend({ tools: [] });
   const ed = () => A.ed();
   const settle = async (ms = 60000) => { const t0 = Date.now(); while ((A.S.busy || A.S.reloading || A.S.queue?.length) && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 50)); };
-  /** One undo step through the Draw module (the plan and the 3D view follow), labelled as the assistant's. */
-  const apply = async (label, op) => {
+  const apply = async (label, op, pre = prefix) => {
     const why = app.busy?.() || (A.S.chain?.points?.length ? 'drawing walls' : null);
     if (why) throw new Error('The person is ' + why + ': try again when they finish.');
     await settle();
     let res = null, err = null;
     const run = (editor) => { try { res = op(editor); return res; } catch (e) { err = e; throw e; } };
-    A.commit(run, { label: 'Assistant: ' + label, verb: '' });
+    A.commit(run, { label: pre + label, verb: '' });
     if (err) throw err;
     await settle();
     return res;
   };
+  return { ed, apply, settle, A };
+}
+
+/** Registers the tools on this window's host.control (bimcraft.js calls it once, with the Draw module). */
+export function installAgents(modelUi, app) {
+  const C = app.control || getHost({ app: 'bimcraft' }).control;
+  const { ed, apply, settle, A } = drawEnv(modelUi, app);
   const keyOf = (guid) => { const e = ed(); const id = e ? writer(e).byGuid(guid) : null; return id ? (app.model()?.keyBase || 0) + id : null; };
   const guidOf = (key) => { const e = ed(); if (!e) return null; try { return val(e.api.GetLine(e.mid, key - (app.model()?.keyBase || 0), false)?.GlobalId) || null; } catch (x) { return null; } };
   const info = () => {

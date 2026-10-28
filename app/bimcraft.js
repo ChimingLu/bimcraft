@@ -87,7 +87,7 @@
  * innerHTML: a model or folder is untrusted input.
  */
 import * as WebIFC from './ifc/api.js';   // cc-ifc, our own IFC engine (0.4 I.11; was web-ifc)
-import { t, has } from './i18n.js';
+import { t, has, locale as appLocale } from './i18n.js';
 import { IfcModel, keyOf, KEY_SPAN } from './ifc-model.js';
 import { IfcEditor } from './ifc-edit.js';
 import { newBuilding, stackLevels, levelsProblem } from './new-model.js';   // 0.5 part 3: File › New building
@@ -103,7 +103,7 @@ import { mountMep } from './mep-ui.js';   // 0.6 DF.29 (bim-draw): Build › Pip
 import { mountViewsBim } from './views-ui.js';   // 0.6 DF.19 (bim-draw): project browser, view ranges, templates, your own sheets
 import { mountFamilies } from './family-ui.js';   // 0.6 DC.114 (bim-families_PART_2): families on IFC types, their sizes, the editor
 import { mountComforts } from './comforts-ui.js';   // 0.6 round 2 (bim-comforts_PART_2): move / turn placed library items, dormers
-import { installAgents } from './agents.js';   // 0.6 DF.25 (bim-draw): the Draw edits as assistant tools, beside bim-agent.js's
+import { installAgents, drawEnv } from './agents.js';   // 0.6 DF.25 (bim-draw): the Draw edits as assistant tools, beside bim-agent.js's
 import { mountCloudSlice } from './cloud-slice-ui.js';   // 0.6 DF.22 (bim-draw): the cloud's slice on the plan, Scan menu
 import { mountTrace } from './model-trace-ui.js';   // 0.6 DF.23 (bim-draw): Build › From a drawing…
 import { mountLinks } from './links-ui.js';   // 0.6 DF.21 (bim-draw): linked models (the Links section)
@@ -4501,6 +4501,9 @@ function init(root) {
     openIfc: (bytes, name) => open(new File([bytes], name), null),
     find: (sel) => root.querySelector(sel),
     showTab: (k) => showTab(k || 'props'),
+    // add-on API 1.1: the Draw edits (agents.js modelTools) for add-ons with the "draw" permission, each step under the add-on's name
+    locale: appLocale(),   // add-ons speak the app's language (?lang=), not only the shell's
+    draw: modelUi ? drawEnv(modelUi, { busy: () => (busy ? 'opening or saving a file' : placing ? 'placing a library item' : null) }, '') : null,   // i18n-ignore: read by the add-on
   }).then((a) => {
     addons = a;
     // the Open picker offers the add-ons' importer extensions too (the picker filters by accept)

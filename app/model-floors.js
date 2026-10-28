@@ -17,10 +17,13 @@
  *                                   points }] }]
  *   placeDrawnFloor({ storey, points, kind, use, thickness, offset }) → op · changeDrawnFloor(guid, { kind, use, thickness,
  *   offset, points }) → op · addFloorOpening(guid, points) → op · removeFloorOpenings(guids) → op · removeDrawnFloors(guids) → op
+ *   removeDrawn(guids) → op: walls (with their doors and windows), doors, windows and these floors by GlobalId, one undo step
  *   Errors: model.err.fl.shape (not a usable outline), model.err.fl.hole (an opening outside the floor or crossing its edge or
  *   another opening), model.err.fl.thick.
  */
-import { op } from './model-ops.js';
+import { op, settleFor } from './model-ops.js';
+import { readWalls, deleteWalls } from './model-walls.js';
+import { readOpenings, deleteOpenings } from './model-openings.js';
 import { FLOOR_KINDS } from './model-slabs.js';
 import { ids, val } from './ifc-util.js';
 import { round } from './model-write.js';
@@ -176,6 +179,27 @@ export function removeDrawnFloors(guids) {
     const fs = readDrawnFloors(w).filter((f) => guids.includes(f.guid));
     const list = fs.flatMap((f) => [f.id, ...f.openings.map((o) => o.id)]);
     if (list.length) w.dropProduct(list);
+    return { id: null, ids: [] };
+  });
+}
+
+/**
+ * Drawn elements taken away by GlobalId, whatever kind each is: walls (with their doors and windows), doors, windows and
+ * floors drawn by outline; any other GlobalId is left alone. One undo step (an add-on's run replacing what it made before).
+ */
+export function removeDrawn(guids) {
+  return op((w) => {
+    const want = new Set(guids);
+    const floors = readDrawnFloors(w).filter((f) => want.has(f.guid));
+    if (floors.length) w.dropProduct(floors.flatMap((f) => [f.id, ...f.openings.map((o) => o.id)]));
+    const walls = readWalls(w).filter((x) => want.has(x.guid)).map((x) => x.guid);
+    const openings = readOpenings(w).filter((o) => want.has(o.guid) && !walls.includes(o.wallGuid)).map((o) => o.guid);
+    const storeys = new Set(), hosts = new Set();
+    if (openings.length) for (const g of deleteOpenings(w, openings).walls) hosts.add(g);
+    if (walls.length) for (const s of deleteWalls(w, walls).storeys) storeys.add(s);
+    const left = readWalls(w);
+    for (const g of hosts) { const x = left.find((y) => y.guid === g); if (x) storeys.add(x.storey); }
+    settleFor(w, storeys, [...hosts]);
     return { id: null, ids: [] };
   });
 }

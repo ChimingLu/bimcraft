@@ -8,7 +8,8 @@
  *   api = { ...sharedApi (ui.toolbarGroup, ui.panelSection, ui.settingsSection, files.importer / exporter),
  *           model: { current, properties, selection, select, onChange },
  *           edit: { setAttribute, setProperty },   (each one undo step through BimCraft's IfcEditor, then the panels refresh)
- *           commands: { add, run, has }, props: { section }, ui.panelTab, status }
+ *           commands: { add, run, has }, props: { section }, ui.panelTab, status,
+ *           draw: { tools, run, made, remove } }   (1.1; only with "draw" in addon.json's permissions — see below)
  *
  * The model is BimCraft's IFC model (ifc-model.js: properties(id) → { id, cls, name, guid, tag, sets: [{ name, rows: [{ name,
  * value, edit }] }] }); ids are the open model's express ids. Importers return { ifc: Uint8Array, name } (opened like an .ifc
@@ -17,14 +18,22 @@
  * The app reads what add-ons registered through the object startAddons returns (also window.ccAddons):
  *   runCommand(key) · propsSections(selection ids, model) → [{ key, label, fields: [{ label, value, edit? }] }] · panelTabs() ·
  *   importerFor(name) / openFromAddon(file) · exporters() / exportInput(name) · changed(why).
+ * draw (1.1) — BimCraft's Draw edits, the same tools an assistant gets (agents.js modelTools): model_describe, walls_list,
+ * walls_add, opening_add, floor_add, levels_add, grid_add. tools() → [{ name, group, title, description, inputSchema }];
+ * run(name, args) → the tool's result, each edit one undo step "<add-on name>: <label>"; made() → the GlobalIds its edits
+ * made (this session); remove(guids) → { removed } takes away walls, doors, windows and floors it made itself (one undo
+ * step; anything else is refused). ctx.draw = { ed, apply(label, op, prefix) } (agents.js drawEnv); without it there is
+ * no model to draw in and run() throws.
  * DOM-free except ui.panelTab: bin/test-addons-model-apps.mjs runs it in Node.
  */
 
 import { AddonLoader, sharedApi } from '../addons.js';
 import { EDITABLE_ATTRS } from '../ifc-edit.js';
 import { installTrust, bundledOnly, NO_PACKAGES } from './trust.js';
+import { modelTools } from '../agents.js';
+import { removeDrawn } from '../model-floors.js';
 
-export const BIMCRAFT_API_VERSION = '1.0';
+export const BIMCRAFT_API_VERSION = '1.1';
 const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,40}$/;
 const clone = (v) => (v === undefined || v === null ? v ?? null : JSON.parse(JSON.stringify(v)));
 
@@ -97,9 +106,56 @@ export function makeBimcraftApi(base, addon, ctx) {
     },
   };
 
+  const draw = drawApi(ctx, addon);
+
   const ui = { ...shared.ui, panelTab: panelTabMaker(ctx, id, base, track, '.bc-rtabs[role="tablist"]', 'bc-rtab', 'bc-rpane-') };
-  const api = { ...shared, ui, model, edit, commands, props, status: (text) => ctx.status(String(text)) };
+  const api = { ...shared, ui, model, edit, commands, props, draw, status: (text) => ctx.status(String(text)) };
   return api;
+}
+
+/** api.draw (1.1): the Draw edits for an add-on with the "draw" permission. */
+function drawApi(ctx, addon) {
+  const allowed = (addon.manifest?.permissions || []).includes('draw');
+  const need = () => {
+    if (!allowed) throw new Error('draw: add "draw" to the permissions in addon.json');
+    if (!ctx.draw) throw new Error('draw: BimCraft has no Draw tools here');
+    return ctx.draw;
+  };
+  const prefix = (addon.manifest?.name || addon.id) + ': ';
+  const made = new Set();
+  let defs = null;
+  const tools = () => {
+    const env = need();
+    if (!defs) {
+      const apply = async (label, op) => {
+        const r = await env.apply(label, op, prefix);
+        for (const g of r?.made?.keys?.() || []) made.add(g);
+        return r;
+      };
+      defs = new Map(modelTools({ ed: env.ed, apply }).map((d) => [d.name, d]));
+    }
+    return defs;
+  };
+  return {
+    tools: () => [...tools().values()].map((d) => clone({ name: d.name, group: d.group, title: d.title, description: d.description, inputSchema: d.inputSchema || { type: 'object', properties: {} } })),
+    async run(name, args = {}) {
+      const d = tools().get(String(name));
+      if (!d) throw new Error('draw.run: no tool "' + name + '"');
+      return clone(await d.run(clone(args) || {}));
+    },
+    made: () => [...made],
+    async remove(guids) {
+      const env = need();
+      const list = [...new Set([...guids].map(String))];
+      const foreign = list.filter((g) => !made.has(g));
+      if (foreign.length) throw new Error('draw.remove: only what this add-on made (' + foreign.slice(0, 3).join(', ') + ')');
+      if (!list.length) return { removed: 0 };
+      if (!env.ed()) throw new Error('no IFC model is open');
+      await env.apply('remove ' + list.length + (list.length > 1 ? ' elements' : ' element'), removeDrawn(list), prefix);
+      for (const g of list) made.delete(g);
+      return { removed: list.length };
+    },
+  };
 }
 
 function panelTabMaker(ctx, id, base, track, listSel, tabClass, paneIdPrefix) {
