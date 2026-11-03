@@ -15,6 +15,7 @@ import { DOOR_TYPES, WINDOW_TYPES, openingTypeName } from './model-openings.js';
 import { ModelWriter } from './model-write.js';
 import { fmtLen } from './model-units.js';
 import { el } from './ui-util.js';
+import { createPlans } from './model-plans-ui.js';   // 0.7 DC.116 (session trace): a PDF or a scan, page by page, one level each
 
 const UNIT_CHOICES = [['', null], ['mm', 1], ['cm', 10], ['m', 1000], ['in', 25.4], ['ft', 304.8]];
 const CSS = `
@@ -31,7 +32,7 @@ const CSS = `
 export function mountTrace(modelUi, o) {
   if (!document.getElementById('bc-trace-css')) { const st = el('style', { id: 'bc-trace-css' }); st.textContent = CSS; document.head.append(st); }
   const R = { underlays: [], cache: new Map(), parts: null, file: null };
-  let A = null;
+  let A = null, plans = null;
   const t = (...a) => A.t(...a);
   const W = () => new ModelWriter(A.ed().W, A.ed().api, A.ed().mid);
   const levelGuid = () => A.S.data.levels.find((l) => l.id === A.S.level)?.guid;
@@ -47,12 +48,13 @@ export function mountTrace(modelUi, o) {
     const here = R.underlays.filter((u) => u.storey === A.S.level);
     const list = el('ul', { className: 'bc-trace-list', 'data-trace-underlays': '' }, ...here.map((u) => el('li', {}, el('span', {}, u.name || u.source),
       el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-trace-remove': u.guid, onClick: () => { close(); A.commit(removeUnderlays([u.guid]), { label: u.name, verb: t('model.verb.deleted') }); } }, t('model.trace.remove')))));
-    const pick = el('input', { type: 'file', accept: '.dwg,.dxf', hidden: true, 'data-trace-file': '' });
+    const pick = el('input', { type: 'file', accept: '.dwg,.dxf,.pdf,.png,.jpg,.jpeg,.tif,.tiff', hidden: true, 'data-trace-file': '' });
     const choose = el('button', { type: 'button', className: 'btn-plot btn-sm-cc', 'data-trace-choose': '', onClick: () => pick.click() }, t('model.trace.choose'));
     pick.addEventListener('change', async () => { if (pick.files[0]) await load(pick.files[0], body, dlg); });
     dlg.append(el('form', { method: 'dialog' },
       el('h2', { className: 'bc-h', id: 'bc-trace-h' }, t('model.trace.title')),
       el('p', { className: 'bc-muted' }, t('model.trace.lede')),
+      el('p', { className: 'bc-muted' }, t('model.trace.plans.lede')),
       here.length ? el('div', {}, el('h3', { className: 'bc-sub' }, t('model.trace.kept')), list) : null,
       el('p', {}, choose, pick), body,
       el('p', { className: 'bc-lib-actions' }, el('button', { type: 'submit', className: 'btn-line btn-sm-cc', value: 'cancel' }, t('model.gp.cancel')))));
@@ -64,6 +66,7 @@ export function mountTrace(modelUi, o) {
 
   /** Read the chosen drawing and show its choices. */
   async function load(file, body, dlg) {
+    if (!/\.(dwg|dxf)$/i.test(file.name)) { plans ||= createPlans(A, { root: A.root.closest('main') || A.root }); return plans.load(file, body, dlg); }   // a PDF or a scan: DC.116
     body.replaceChildren(el('p', { className: 'bc-muted' }, t('model.trace.reading', { name: file.name })));
     let model;
     try {

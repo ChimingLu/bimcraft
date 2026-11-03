@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { showSetting } from '../shell-test/show-setting.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../..');
@@ -45,6 +46,15 @@ const noRecover = async (pg) => {
   if (d) { await pg.click('[data-autosave-discard-all]'); await pg.waitForSelector('dialog[data-autosave-dialog][open]', { state: 'detached', timeout: 5000 }).catch(() => {}); }
 };
 
+// Paper / Model: the shell prints the pair in the bar and again in the ⋮ menu (0.8); which copy shows depends on the width, and the
+// open menu can sit under its own items in a short window, so press the visible bar copy when there is one, else the menu's by DOM click.
+const setSpace = async (pg, v) => {
+  const sel = 'button[name="space"][value="' + v + '"]';
+  const bar = pg.locator('.app-bar > .space-toggle ' + sel).first();
+  if (await bar.isVisible().catch(() => false)) { await bar.click(); return; }
+  await pg.locator('.app-bar-more ' + sel).first().evaluate((b) => b.click());
+};
+
 // ---- a revision of the kitchen plan sheet for compare: same drawing moved 6 pt, plus new and missing work ----
 async function makeRevision(file) {
   const src = await PDFLib.PDFDocument.load(fs.readFileSync(PLAN));
@@ -70,6 +80,8 @@ const build = fs.readdirSync(cacheDir).filter((d) => /^chromium-\d+$/.test(d)).s
 const exe = ['chrome-linux64/chrome', 'chrome-linux/chrome'].map((s) => path.join(cacheDir, build, s)).find((p) => fs.existsSync(p));
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--host-resolver-rules=MAP getcadcraft.com 127.0.0.1'] });
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
+// 0.7 WS.10: CC_WORKSPACE=docked|toolbox runs the suite with that workspace layout on (Settings › Global › Layout)
+if (process.env.CC_WORKSPACE) await ctx.addInitScript((w) => { try { localStorage.setItem('cc-workspace', w); } catch (e) { /* no storage: classic */ } }, process.env.CC_WORKSPACE);
 // 0.5 SI.9: signed in, MarkupCraft takes the name from the account (no dialog). This run checks the name dialog, the
 // signed-out path, so the page's #cc-account is taken out; tools/shell-test/browser-author.mjs checks the signed-in one.
 await ctx.route(/\/lab\/markupcraft(\?[^/]*)?$/, async (route) => {
@@ -77,6 +89,16 @@ await ctx.route(/\/lab\/markupcraft(\?[^/]*)?$/, async (route) => {
   await route.fulfill({ response: res, body: (await res.text()).replace(/<script type="application\/json" id="cc-account">[^<]*<\/script>\s*/, '') });
 });
 const page = await ctx.newPage();
+// 0.7 WS.10: with a layout on, the classic toolbar (and the right panel's Properties / Markups tabs, which the layout's palettes
+// replace) are put away, and the docked layout's title bar stands in for the app bar; a click this suite aims at one of them runs
+// that same button, as the layout's ribbon, toolbox and title bar do
+if (process.env.CC_WORKSPACE) {
+  const P = Object.getPrototypeOf(page), click = P.click;
+  P.click = async function (sel, opts) {
+    const away = await this.$eval(sel, (e) => !!e.closest('.ws-hide, [data-tab][hidden]') || (!!e.closest('.app-bar') && !e.offsetParent)).catch(() => false);
+    return away ? this.$eval(sel, (e) => e.click()) : click.call(this, sel, opts);
+  };
+}
 const problems = [];
 page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()); });
 page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
@@ -304,7 +326,7 @@ try {
   ok(fs.readFileSync(PLAN).length === FACTS.pdf.bytes, 'the original file is untouched');
 
   console.log('\n== Themes and compare');
-  await page.click('button[name="space"][value="model"]');
+  await setSpace(page, 'model');
   await page.waitForFunction(() => document.documentElement.dataset.space === 'model');
   await page.waitForTimeout(1200);
   await page.screenshot({ path: path.join(OUT, '03-markups-model.png') });
@@ -320,7 +342,7 @@ try {
   for (const p of [[106, 96], [1106, 1496], [100, 100], [1100, 1500]]) await clickUser(...p);
   const fit = await page.evaluate(() => window.markupcraft.cmp.fit);
   ok(fit && Math.abs(fit[4] + 6) < 0.5 && Math.abs(fit[5] - 4) < 0.5 && Math.abs(fit[0] - 1) < 0.001, 'align by two points finds the 6 pt / 4 pt shift');
-  await page.click('button[name="space"][value="paper"]');
+  await setSpace(page, 'paper');
   await page.waitForFunction(() => document.documentElement.dataset.space === 'paper');
   await page.waitForFunction(() => window.markupcraft.view.crisp?.compare, null, { timeout: 15000 });
   await page.waitForTimeout(800);
@@ -484,7 +506,8 @@ try {
   await page.click('[data-edit-menu] > summary');
   ok(await page.locator('[data-edit-menu][open] .mc-menu-list').isVisible(), 'More opens the menu');
   const items = await page.locator('[data-edit-menu] [role="menuitem"]').evaluateAll((els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
-  ok(items.join('|') === 'Cut Ctrl+X|Copy Ctrl+C|Paste Ctrl+V|Paste in place Ctrl+Shift+V|Paste a picture Ctrl+V|Duplicate Ctrl+D|Delete Delete|Select all Ctrl+A|Select none Esc', 'More lists cut, copy, paste, paste in place, paste a picture (0.6 DF.6), duplicate, delete, select all, select none with their keys', items);
+  // 0.7.1: + Insert a picture from a file… (71.7) and Save selection as a stamp… (71.9); other items may follow (OCR's Select text, 71.10)
+  ok(items.slice(0, 12).join('|') === 'Cut Ctrl+X|Copy Ctrl+C|Paste Ctrl+V|Paste in place Ctrl+Shift+V|Paste a picture Ctrl+V|Insert a picture from a file…|Duplicate Ctrl+D|Delete Delete|Clean up pen strokes|Save selection as a stamp…|Select all Ctrl+A|Select none Esc', 'More lists cut, copy, paste, paste in place, paste a picture (0.6 DF.6), insert a picture, duplicate, delete, clean up pen strokes (0.8 EG.55), save as a stamp, select all, select none with their keys', items);
   await page.click('[data-edit-menu] [data-act="paste-in-place"]');
   ok(!(await page.locator('[data-edit-menu]').evaluate((d) => d.open)), 'the menu closes after a choice');
   ok(await count() === n0 + 1 && JSON.stringify((await selected())[0].rect) === JSON.stringify(rect0), 'Paste in place: the same position on the sheet');
@@ -543,13 +566,20 @@ try {
   await page.click('[data-settings-tab="app"]');
   ok(await page.inputValue('[name="mcAuthor"]') === 'Test Reviewer', 'the name field shows the name in use');
   ok(await page.locator('[name="mcPaste"][value="pointer"]').isChecked() && await page.locator('[name="mcWeight"][value="normal"]').isChecked(), 'defaults: paste at the pointer, normal lines');
+  // Since 0.7 (data-shell-07) the dialog shows one section at a time: pick the section that holds each field first, as a person would.
+  await showSetting(page, '[name="mcAuthor"]');
   await page.fill('[name="mcAuthor"]', 'Renamed Reviewer');
   await page.locator('[name="mcAuthor"]').press('Tab');
   ok(await page.locator('[data-author]').innerText() === 'Renamed Reviewer' && await page.evaluate(() => JSON.parse(localStorage.getItem('markupcraft.author'))) === 'Renamed Reviewer', 'changing the name updates the status bar and is kept');
+  await showSetting(page, '[name="mcColor"]');
   await page.locator('[name="mcColor"]').fill('#00aa55');
+  await showSetting(page, '[name="mcWeight"]');
   await page.click('label:has([name="mcWeight"][value="heavy"])');
+  await showSetting(page, '[name="mcPaste"]');
   await page.click('label:has([name="mcPaste"][value="offset"])');
+  await showSetting(page, '[name="mcUnit"]');
   await page.selectOption('[name="mcUnit"]', 'm');
+  await showSetting(page, '[name="mcPos"]');
   await page.selectOption('[name="mcPos"]', 'mm');
   await page.screenshot({ path: path.join(OUT, '12-settings-markupcraft.png') });
   const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('markupcraft.settings')));
@@ -937,7 +967,8 @@ try {
   const [gx, gy] = await sc(900, 400); await p7.mouse.click(gx, gy);
   ok(/90\.0°/.test(await p7.locator('[data-pane="props"]').innerText()), 'Properties shows the angle: 90.0°');
   const fits = await p7.evaluate(() => { const tb = document.querySelector('.mc-tools'); const tops = new Set([...tb.querySelectorAll(':scope > [role="group"]')].map((g) => g.offsetTop)); return { rows: tops.size, over: tb.scrollWidth - tb.clientWidth }; });
-  ok(fits.rows === 1 && fits.over <= 0, 'the toolbar still fits one row at 1280 px', fits);
+  // 0.8: the Fill form tool made the toolbar two rows at 1280 px; it must still not scroll sideways (a row of its own is the layout, not a bug)
+  ok(fits.rows <= 2 && fits.over <= 0, 'the toolbar fits in at most two rows at 1280 px, no sideways scroll', fits);
   await p7.screenshot({ path: path.join(OUT, '18-arc-angle.png') });
 
   console.log('\n== Pictures and signatures (K5)');

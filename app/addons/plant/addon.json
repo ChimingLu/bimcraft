@@ -1,0 +1,22 @@
+{
+  "id": "plant",
+  "name": "Plant",
+  "version": "0.8.0",
+  "apps": [
+    "bimcraft"
+  ],
+  "api": "1.0",
+  "license": "Apache-2.0",
+  "entry": "./main.js",
+  "permissions": [
+    "commands",
+    "panel",
+    "files",
+    "storage"
+  ],
+  "description": "Plant and factory design: pipe specs checked against the runs in the model, isometric drawings with a bill of materials, generic process equipment with nozzles as an IFC file, a layout check, and a check of the runs against a process model (line velocity and drop). A drafting aid, not an engineering approval.",
+  "author": "CadCraft",
+  "lang": "./lang/",
+  "help": "./help/help.js",
+  "default": "off"
+}

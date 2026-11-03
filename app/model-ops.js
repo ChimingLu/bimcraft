@@ -13,9 +13,12 @@
  * Every op ends by bringing the walls it may have changed up to date (model-walls.js regenWalls): joins, heights that
  * follow a level, quantities.
  */
+import { writeAssembly, validateAssembly, assertAssembliesEditable } from './wall-assemblies.js';
+import { readMaterials } from './project-materials.js';
+import { syncWallDimensions } from './wall-dimensions.js';
 import { ModelWriter } from './model-write.js';
 import { readLevels, addLevel, setLevel } from './model-levels.js';
-import { addWall, updateWall, deleteWalls, regenWalls, readWalls } from './model-walls.js';
+import { addWall, updateWall, deleteWalls, regenWalls, readWalls, wallLevelsPassed } from './model-walls.js';
 import { addOpening, updateOpening, deleteOpenings, readOpenings, regenOpenings } from './model-openings.js';
 import { syncDerived, readDerived, storeyLoops, addFloor, addCeiling, addRoof, updateDerived, deleteDerived } from './model-slabs.js';
 import { wallPath } from './model-tools.js';
@@ -24,9 +27,13 @@ import { syncResidential } from './res-follow.js';   // 0.5 part 4 track RC: wal
 
 /** Wrap a writing function as an op: a fresh writer on the editor's model, one journal. */
 export function op(fn) {
+  const seq = [];   // 0.7 BIM-FAM-SOLID: the GlobalIds a run makes are handed out again, in order, when Redo runs the op again (a size made by one step is found by the next)
   return (ed) => {
     const w = new ModelWriter(ed.W, ed.api, ed.mid);
-    return w.run(fn);
+    let n = 0;
+    const fresh = w.guid.bind(w);
+    w.guid = () => { if (n < seq.length) return seq[n++]; const g = fresh(); seq.push(g); n++; return g; };
+    return w.run(writer => { assertAssembliesEditable(writer); readMaterials(writer); const result = fn(writer); syncWallDimensions(writer); return result; });
   };
 }
 const storeyId = (w, guid) => {
@@ -50,11 +57,79 @@ export function regenAll(w) {
 }
 /** After walls changed on these storeys: joins, then rooms / floors / ceilings / roofs that follow them. */
 function settle(w, storeys, force = null) {
-  for (const s of new Set(storeys)) { if (s === null || s === undefined) continue; regenWalls(w, s, force); syncDerived(w, s); }
+  const set = new Set([...storeys].filter((s) => s !== null && s !== undefined));
+  for (const s of set) { regenWalls(w, s, force); syncDerived(w, s); }
+  // 0.7 BIM-MLWALL: a wall that runs up through a level closes that level's rooms, so the levels above a changed one are brought
+  // up to date too when they hold rooms, floors or ceilings of their own or a wall now passes them (nothing else there can change)
+  const levels = readLevels(w);
+  if (levels.length > 1 && set.size) {
+    const lowest = Math.min(...[...set].map((s) => levels.findIndex((l) => l.id === s)).filter((i) => i >= 0));
+    if (Number.isFinite(lowest) && lowest < levels.length - 1) {
+      const D = readDerived(w), walls = readWalls(w), have = new Set([...D.spaces, ...D.floors, ...D.ceilings].map((x) => x.storey));
+      const passed = new Set();
+      for (const x of walls) if (set.has(x.storey)) for (const l of wallLevelsPassed(x, levels)) passed.add(l.id);
+      for (const l of levels.slice(lowest + 1)) if (!set.has(l.id) && (passed.has(l.id) || have.has(l.id))) syncDerived(w, l.id);
+    }
+  }
 }
 /** For ops written elsewhere (model-trim.js, 0.6): the same follow-ups as this file's own wall changes. */
 export const afterWallMoveFor = (w, before, ops0, guids) => afterWallMove(w, before, ops0, guids, false);
 export const settleFor = (w, storeys, force = null) => settle(w, storeys, force);
+
+/** Edit a project type and all its instances as one undoable transaction. */
+export function saveWallAssembly(input, assign = []) {
+  const recipe = validateAssembly(input); let typeGuid = null;
+  return op(w => {
+    const before = readWalls(w), openings = readOpenings(w, null, before);
+    typeGuid ||= val(w.guid());
+    const result = writeAssembly(w, recipe, typeGuid);
+    const affected = before.filter(x => x.typeKey === recipe.key || assign.includes(x.guid));
+    for (const wall of affected) updateWall(w, wall.guid, { typeKey: recipe.key, refreshType: true }, { carryJoined: false, previousType: wall.assembly });
+    const guids = rejoinAssemblyCorners(w, before, affected.map(x => x.guid));
+    afterWallMove(w, before, openings, guids, true);
+    settle(w, affected.map(x => x.storey));
+    return { id: affected[0]?.id ?? null, ids: affected.map(x => x.id), typeId: result.id };
+  });
+}
+
+// Intersect the final axes, after every instance has its new core offset. Intersecting
+// against a neighbour's old axis during each update would leave an open L corner.
+function rejoinAssemblyCorners(w, before, changed) {
+  const changedSet = new Set(changed), after = new Map(readWalls(w).map(x => [x.guid, x]));
+  const buckets = new Map(), nodes = [];
+  for (const wall of before) for (const end of ['a', 'b']) {
+    const p = wall[end], x = Math.floor(p[0]), y = Math.floor(p[1]);
+    let node = null;
+    for (let dx = -1; dx <= 1 && !node; dx++) for (let dy = -1; dy <= 1 && !node; dy++) {
+      node = (buckets.get(`${wall.storey}:${x+dx}:${y+dy}`) || []).find(n => Math.hypot(n.p[0]-p[0],n.p[1]-p[1]) <= 1);
+    }
+    if (!node) {
+      node = { p, ends: [] }; nodes.push(node);
+      const key = `${wall.storey}:${x}:${y}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(node);
+    }
+    node.ends.push({ wall, end });
+  }
+  const edits = new Map();
+  for (const node of nodes) {
+    if (node.ends.length !== 2 || !node.ends.some(e => changedSet.has(e.wall.guid))) continue;
+    const [a, b] = node.ends, A = after.get(a.wall.guid), B = after.get(b.wall.guid);
+    if (!A || !B || A.bulge || B.bulge) continue;
+    const u = [A.b[0]-A.a[0],A.b[1]-A.a[1]], v = [B.b[0]-B.a[0],B.b[1]-B.a[1]];
+    const cross = u[0]*v[1]-u[1]*v[0];
+    if (Math.abs(cross) < 1e-9 * A.len * B.len) continue;
+    const s = ((B.a[0]-A.a[0])*v[1]-(B.a[1]-A.a[1])*v[0])/cross;
+    const p = [A.a[0]+s*u[0],A.a[1]+s*u[1]];
+    if (Math.hypot(p[0]-node.p[0],p[1]-node.p[1]) > 4*Math.max(A.t,B.t)) continue;
+    for (const e of [a,b]) {
+      if (!edits.has(e.wall.guid)) edits.set(e.wall.guid, {});
+      edits.get(e.wall.guid)[e.end] = p;
+    }
+  }
+  for (const [guid, ch] of edits) { updateWall(w, guid, ch, { carryJoined: false }); changedSet.add(guid); }
+  return [...changedSet];
+}
 
 /** Draw walls on a storey: segs [{ a, b }] in its plan axes (mm). One undo step for all of them. */
 export function drawWalls({ storey, segs, typeKey, baseOffset = 0, topLevel = '', topOffset = 0, height = 0, extSide = 'left' }) {
@@ -73,9 +148,53 @@ export function drawWalls({ storey, segs, typeKey, baseOffset = 0, topLevel = ''
   });
 }
 
+/**
+ * 0.7 SU.461 (a floor plan copied up to the next floor): everything the Draw tools made on level `from` — walls with their doors and
+ * windows, and the floors and ceilings (not roofs: they belong to the top) — drawn again on level `to` (GlobalIds), in one undo step.
+ * A wall that follows the level above follows the level the same number of levels above `to` (a fixed height stays); rooms there
+ * appear by themselves. → { id, ids, made, counts: { walls, openings, floors, ceilings } }. Copying onto a level that already has
+ * walls adds to them (the page asks first).
+ */
+export function copyLevel({ from, to, newLevel: spec = null }) {
+  const keep = new Map();   // (to = null and newLevel { name, elevation, height }: the level is made in the same step)   // source GlobalId → the GlobalIds its copy gets, fixed the first time so a redo makes the same elements again
+  const fresh = (w, key, n = 1) => { if (!keep.has(key)) keep.set(key, Array.from({ length: n }, () => val(w.guid()))); return keep.get(key); };
+  return op((w) => {
+    const src = storeyId(w, from);
+    let dst;
+    if (to) dst = storeyId(w, to);
+    else { const [lg] = fresh(w, 'new-level'); dst = addLevel(w, { ...spec, guid: lg }).id; }
+    if (src === dst) throw Object.assign(new Error('model.err.copysame'), { key: 'model.err.copysame' });
+    const levels = readLevels(w), si = levels.findIndex((l) => l.id === src), di = levels.findIndex((l) => l.id === dst);
+    const walls = readWalls(w, src);
+    if (!walls.length) throw Object.assign(new Error('model.err.copynone'), { key: 'model.err.copynone' });
+    const made = new Map(), map = new Map();
+    for (const x of walls) {
+      const top = x.topLevel ? levels.findIndex((l) => l.guid === x.topLevel) : -1;
+      const nt = top >= 0 ? levels[top + (di - si)] : null;
+      const [g] = fresh(w, x.guid);
+      const r = addWall(w, { storey: dst, a: x.a, b: x.b, typeKey: x.typeKey, baseOffset: x.baseOffset, topLevel: nt ? nt.guid : '', topOffset: nt ? x.topOffset : 0, height: nt ? 0 : x.height, extSide: x.extSide, guid: g, bulge: x.bulge || 0, justification: x.justification });
+      made.set(r.guid, r.id); map.set(x.guid, r.guid);
+    }
+    let openings = 0;
+    for (const o of readOpenings(w, src, walls)) {
+      const [g, og] = fresh(w, o.guid, 2);
+      const r = addOpening(w, { wall: map.get(o.wallGuid), typeKey: o.typeKey, family: o.family, values: o.values, sizeName: o.sizeName, offset: o.offset, width: o.width, height: o.height, sill: o.sill, hand: o.hand, face: o.face, guid: g, openingGuid: og });
+      made.set(r.guid, r.id); openings++;
+    }
+    settle(w, [dst]);
+    afterOpenings(w, [...map.values()]);
+    const D = readDerived(w);
+    let floors = 0, ceilings = 0;
+    for (const f of D.floors.filter((x) => x.storey === src)) { const [g] = fresh(w, f.guid); const r = addFloor(w, { storey: dst, seed: f.seed, mode: f.mode, kind: f.kind, thickness: f.thickness, offset: f.offset, guid: g }); made.set(r.guid, r.id); floors++; }
+    for (const c of D.ceilings.filter((x) => x.storey === src)) { const [g] = fresh(w, c.guid); const r = addCeiling(w, { storey: dst, seed: c.seed, mode: c.mode, height: c.height, thickness: c.thickness, guid: g }); made.set(r.guid, r.id); ceilings++; }
+    const ids = [...made.values()];
+    return { id: ids[ids.length - 1], ids, made, counts: { walls: walls.length, openings, floors, ceilings } };
+  });
+}
+
 /** Extend a face-referenced chain and settle its corners in the same undo step. */
-export function drawWallPath({ storey, points, guids, typeKey, thickness, reference, extSide, ...top }) {
-  const segs = wallPath(points, thickness, reference, extSide);
+export function drawWallPath({ storey, points, guids, typeKey, thickness, reference, extSide, axisOffset, ...top }) {
+  const segs = wallPath(points, thickness, reference, extSide, axisOffset);
   let existing = null;
   return op((w) => {
     existing ??= guids.slice();

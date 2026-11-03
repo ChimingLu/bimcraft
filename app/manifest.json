@@ -2,12 +2,18 @@
   "app": "bimcraft",
   "css": [
     "bimcraft.css",
-    "frame/frame-panel.css"
+    "frame/frame-panel.css",
+    "vault/vault-panel.css",
+    "compute/compute.css",
+    "workspace/bimcraft-workspace.css"
   ],
   "module": "bimcraft.js",
   "imports": {
     "three": "/assets/vendor/three/current/three.module.js",
     "three/addons/": "/assets/vendor/three/current/addons/",
+    "three/webgpu": "/assets/vendor/three-webgpu/current/three.webgpu.js",
+    "three/tsl": "/assets/vendor/three-webgpu/current/three.tsl.js",
+    "three-webgpu/addons/": "/assets/vendor/three-webgpu/current/addons/",
     "manifold-3d": "/assets/vendor/manifold-3d/current/manifold.js",
     "laz-perf": "/assets/vendor/laz-perf/current/laz-perf.js",
     "web-e57/": "/assets/vendor/web-e57/current/",
@@ -20,16 +26,40 @@
     "three/examples/jsm/postprocessing/Pass.js": "/assets/vendor/three-gpu-pathtracer/current/three-addons/Pass.js",
     "delaunator": "/assets/vendor/delaunator/current/index.js",
     "robust-predicates": "/assets/vendor/robust-predicates/current/index.js",
-    "geotiff": "/assets/vendor/geotiff/current/geotiff.esm.min.js"
+    "geotiff": "/assets/vendor/geotiff/current/geotiff.esm.min.js",
+    "pdfjs-dist": "/assets/vendor/pdfjs/current/build/pdf.min.mjs",
+    "oidn-weights": "/assets/vendor/oidn-weights/current/rt_hdr_alb_nrm_small.tza"
   },
+  "pdfWorker": "/assets/vendor/pdfjs/current/build/pdf.worker.min.mjs",
+  "pdfCmaps": "/assets/vendor/pdfjs/current/cmaps/",
+  "pdfFonts": "/assets/vendor/pdfjs/current/standard_fonts/",
+  "pdfWasm": "/assets/vendor/pdfjs/current/wasm/",
+  "pdfIcc": "/assets/vendor/pdfjs/current/iccs/",
   "phone": { "toolbar": "[data-toolbar]", "options": "[data-modelbar]", "hint": "[data-model-hint], .bc-status" },
+  "devices": true,
+  "calc": true,
+  "reasons": true,
+  "teamwork": true,
+  "totals": true,
+  "lessons": true,
+  "ai-suggest": true,
+  "ai-activity": true,
+  "ai-ask": true,
   "panels": [
     "move",
     "window"
   ],
   "addons": "own",
   "accepts": [
-    "live"
+    "live",
+    "mass",
+    "site"
   ],
-  "input": "input-bimcraft.js"
+  "input": "input-bimcraft.js",
+  "workspaces": { "layouts": ["docked", "toolbox", "autorev"], "adapter": "workspace-bimcraft.js" },
+  "problems": true,
+  "propgrid": true,
+  "access": true,
+  "fields": true,
+  "engines": true
 }

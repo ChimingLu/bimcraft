@@ -41,7 +41,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Visibility, batchIndex, batchEdges, edgeIndex, boundsOf, SOLID } from './ifc-vis.js';
+import { Visibility, batchIndex, batchEdges, edgeIndex, boundsOf, boundsMapOf, SOLID } from './ifc-vis.js';
 import { KEY_SPAN } from './ifc-model.js';
 import { runOf, runEdges, faceRegion, snapTo } from './measure.js';
 import { cleanVolume, cellPlanes, polyhedron, modelSpec, capSpec, specKey, clipGlsl } from './section-volume.js';
@@ -117,6 +117,7 @@ export class Viewer3D {
     this.vis = new Visibility();
     this.batches = [];
     this.edgesOn = true;
+    this.displayMode = 'edges';
     this.spacesOn = false;
     this.box = new THREE.Box3();
 
@@ -128,6 +129,22 @@ export class Viewer3D {
     this.resizeObserver.observe(canvas.parentElement);
     this.resize();
     this.bindPicking();
+    // 0.8 Track ID: hand the view to the input-device layer (assets/js/app-devices-ui.js) — through OrbitControls as a mouse drag
+    // and the wheel move it (rotate/pan speeds, zoom toward the target like this view's own wheel, so (x, y) is not used); while
+    // walking an orbit looks round as a drag does and the rest waits; fit = frame what is shown keeping the direction, else Iso
+    (window.ccViews ||= []).push({
+      el: canvas, kind: '3d',
+      orbit: (dx, dy) => {
+        if (this.walk) { this.walkLook(dx, dy); return; }
+        const c = this.controls, h = canvas.clientHeight || 1;
+        if (!c.enabled) return;
+        this.onUserMove?.();
+        c._rotateLeft(2 * Math.PI * dx * c.rotateSpeed / h); c._rotateUp(2 * Math.PI * dy * c.rotateSpeed / h); c.update();
+      },
+      pan: (dx, dy) => { const c = this.controls; if (this.walk || !c.enabled) return; this.onUserMove?.(); c._pan(dx * c.panSpeed, dy * c.panSpeed); c.update(); },
+      zoom: (f) => { const c = this.controls; if (this.walk || !c.enabled || !(f > 0)) return; this.onUserMove?.(); c._dollyIn(1 / f); c.update(); },
+      fit: () => { if (this.walk) return; if (!this.frameKeys(this.shownKeys())) this.view('iso'); },
+    });
   }
 
   /** Background, edge and highlight colours come from the page's paper/model tokens. */
@@ -186,6 +203,7 @@ export class Viewer3D {
     this.spaceMeshes = Ls.flatMap((L) => L.spaceMeshes);
     this.batches = Ls.flatMap((L) => L.batches);
     this.edgesAvailable = Ls.some((L) => L.edges.length);
+    this.applyDisplayMode();
     this.box.makeEmpty();
     for (const L of Ls) if (L.group.visible && !L.box.isEmpty()) this.box.union(L.box.clone().applyMatrix4(L.group.matrix));
     if (this.box.isEmpty()) for (const L of Ls) if (L.group.visible) for (const m of L.spaceMeshes) this.box.union(m.geometry.boundingBox.clone().applyMatrix4(L.group.matrix));
@@ -317,6 +335,18 @@ export class Viewer3D {
       if (bb) box.union(new THREE.Box3(new THREE.Vector3(...bb.min), new THREE.Vector3(...bb.max)).applyMatrix4(L.group.matrix));
     }
     return box.isEmpty() ? null : { min: box.min.toArray(), max: box.max.toArray() };
+  }
+
+  /** World-space bounds of each element on its own, over every model: Map key → { min, max } (0.8 AC.8, ask-tools.js). */
+  keyBoundsMap(keys) {
+    const out = new Map(), box = new THREE.Box3();
+    for (const L of this.layers.values()) {
+      for (const [k, bb] of boundsMapOf(L.batches, keys)) {
+        box.set(new THREE.Vector3(...bb.min), new THREE.Vector3(...bb.max)).applyMatrix4(L.group.matrix);
+        out.set(k, { min: box.min.toArray(), max: box.max.toArray() });
+      }
+    }
+    return out;
   }
 
   /** Where the pointer meets the horizontal plane y = h (viewer space), or null. */
@@ -573,6 +603,8 @@ export class Viewer3D {
   turnDir(d) { if (!this.sectionTurn) return d.clone(); const a = this.sectionTurn; return new THREE.Vector3(d.x * Math.cos(a) + d.z * Math.sin(a), d.y, -d.x * Math.sin(a) + d.z * Math.cos(a)); }
   unturnDir(d) { if (!this.sectionTurn) return d.clone(); const a = -this.sectionTurn; return new THREE.Vector3(d.x * Math.cos(a) + d.z * Math.sin(a), d.y, -d.x * Math.sin(a) + d.z * Math.cos(a)); }
   /** A point of the section box's space (IFC axes, m from the frame's minimum corner) in viewer coordinates. */
+  /** 0.8 BIM-FAM-MORE: the inverse of ifcPoint — a scene point [x, y, z] → the grip space's [x, y, z] (IFC axes, metres from the minimum corner). */
+  relPoint(s) { const B = this.secBox(), T = this.toTurned(new THREE.Vector3(s[0], s[1], s[2])); return [T.x - B.min.x, B.max.z - T.z, T.y - B.min.y]; }
   ifcPoint(p) { const B = this.secBox(); return this.fromTurned(new THREE.Vector3(B.min.x + p[0], B.min.y + p[2], B.max.z - p[1])); }
   /** World bounds of elements as a section box in IFC axes from the model's minimum corner, with a margin (metres). */
   boxAround(keys, margin = 0.3) {
@@ -656,8 +688,22 @@ export class Viewer3D {
 
   setEdges(on) {
     this.edgesOn = on;
-    for (const e of this.edges) e.visible = on;
+    this.displayMode = on ? 'edges' : 'shaded';
+    this.applyDisplayMode();
     this.render();
+  }
+
+  setDisplayMode(mode) {
+    if (!['shaded', 'edges', 'wireframe'].includes(mode)) return;
+    this.displayMode = mode;
+    this.edgesOn = mode === 'edges';
+    this.applyDisplayMode();
+    this.render();
+  }
+
+  applyDisplayMode() {
+    for (const mesh of this.meshes) for (const material of mesh.material) material.wireframe = this.displayMode === 'wireframe';
+    for (const edge of this.edges) edge.visible = this.displayMode === 'edges';
   }
 
   /** The view presets' frame (0.6 DC.57): turned by `rad` about the vertical, so a building turned in its site is seen
@@ -671,7 +717,9 @@ export class Viewer3D {
     const c = this.box.getCenter(new THREE.Vector3());
     const size = this.box.getSize(new THREE.Vector3());
     const radius = Math.max(size.length() / 2, 0.5);
-    const dist = radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2)) * 1.05;
+    // 0.7 SU.751: the field of view is vertical; in a pane taller than wide the width is what runs out first (the house was cut off at the side)
+    const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2), halfH = Math.atan(Math.tan(halfV) * (this.camera.aspect > 0 ? this.camera.aspect : 1));
+    const dist = radius / Math.sin(Math.min(halfV, halfH)) * 1.05;
     const dirs = {
       iso: new THREE.Vector3(1, 0.8, 1),
       top: new THREE.Vector3(0, 1, 0.0001),

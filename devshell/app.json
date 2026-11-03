@@ -19,6 +19,7 @@
         "partcraft": "PartCraft"
     },
     "vendor": {
+        "coolprop": "6.6.0",
         "delaunator": "5.1.0",
         "geotiff": "3.0.5",
         "laz-perf": "0.0.7",
@@ -26,16 +27,20 @@
         "noble-ciphers": "2.4.0",
         "noble-curves": "2.4.0",
         "noble-hashes": "2.4.0",
+        "oidn-weights": "2.3.0",
+        "pdfjs": "6.3.289",
         "proj4": "2.22.0",
+        "rdkit": "2026.9.1",
         "robust-predicates": "3.0.3",
         "three": "0.186.1",
         "three-gpu-pathtracer": "0.0.26",
         "three-mesh-bvh": "0.9.15",
+        "three-webgpu": "0.186.1",
         "web-e57": "1.2.0"
     },
     "origin": "https://getcadcraft.com",
     "packed": {
-        "at": "2026-10-19T00:34:43Z",
+        "at": "2026-11-02T15:12:09Z",
         "build": "dev"
     }
 }

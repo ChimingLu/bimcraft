@@ -31,7 +31,7 @@ Use a plan you (or someone else) drew in the drafting app as the start of the mo
 - In the IFC file the kept drawing is an annotation on the level (its lines), so other BIM programs show it too.
 
 :::note
-Arcs are left out (BimCraft draws straight walls), and so are lines inside blocks. Lines with no partner in "both faces" are counted in the dialog and left out: draw those walls with the {{ui:Wall}} tool, or tidy them with {{ui:Modify}} › {{ui:Trim / extend}} (see [Trim, extend and join walls](topic:trim-extend-walls)).
+A PDF or a scan works too: see [Walls from a set of plans](topic:walls-from-plans). Arcs are left out (BimCraft draws straight walls), and so are lines inside blocks. Lines with no partner in "both faces" are counted in the dialog and left out: draw those walls with the {{ui:Wall}} tool, or tidy them with {{ui:Modify}} › {{ui:Trim / extend}} (see [Trim, extend and join walls](topic:trim-extend-walls)).
 :::
 
 :::tip

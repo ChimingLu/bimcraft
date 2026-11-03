@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /**
  * looks.js — the render's settings, material looks, skies and the small maths the renderer needs. No DOM, no three.js,
- * no imports, so Node tests it as is. Part of the shared renderer (0.5 RC.11): canonical in modelcraft/dev/render/,
+ * no imports but pt-mix.js and pt-post.js (both DOM-free), so Node tests it as is. Part of the shared renderer (0.5 RC.11): canonical in modelcraft/dev/render/,
  * byte-identical copy in bimcraft/dev/render/ (node tools/render/sync.mjs [--check]); never edit the copy.
  *
  *   DEFAULTS, MODES, MINUTES, QUALITY, SIZES, SKIES, LOOKS, LOOK_KEYS
@@ -16,6 +16,9 @@
  *   colorKey(c) → '#rrggbb' | null     a colour as the looks table keys it
  *   NIGHT, LIGHT_SCALE, SHADOW_LAMPS, lampCandela(L), lampAt(L, i)   lamps and the night (RC.11 (d))
  */
+import { cleanMix, MAX_PRESETS } from './pt-mix.js';
+import { cleanPost, POST_DEFAULTS } from './pt-post.js';
+import { cleanEngineId } from './engines.js';
 
 export const MAX_SIDE = 4096;
 
@@ -37,6 +40,10 @@ export const SKIES = {
   overcast: { zenith: '#b9c0c8', horizon: '#dfe2e5', ground: '#8a8781', sun: 0.35, sky: 3.0, env: 0.8, tint: '#f4f2ee', skyTint: '#eef0f3' },
   dusk: { zenith: '#3d4f78', horizon: '#e9b48a', ground: '#5d5650', sun: 2.2, sky: 0.9, env: 0.35, tint: '#ffb877', skyTint: '#b9c4e6' },
   white: { zenith: '#ffffff', horizon: '#ffffff', ground: '#f2f2f2', sun: 2.6, sky: 2.0, env: 0.7, tint: '#fffaf2', skyTint: '#f4f7ff', plain: true },
+  // 0.7 RN.3, the path tracer on the graphics card: Preetham's physical sky (turbidity) and a picture (HDRI). The fast render and
+  // the WebGL engine show these as the clear sky.
+  physical: { zenith: '#2f6cb3', horizon: '#c4d6e8', ground: '#8f8a80', sun: 3.2, sky: 1.6, env: 0.45, tint: '#fff4e5', skyTint: '#dfeaff', physical: true },
+  hdri: { zenith: '#2f6cb3', horizon: '#c4d6e8', ground: '#8f8a80', sun: 3.2, sky: 1.6, env: 0.45, tint: '#fff4e5', skyTint: '#dfeaff', hdri: true },
 };
 /** The sky when the sun is down (any sky but the white studio): a dark blue night, lit faintly; lamps do the rest. */
 export const NIGHT = { zenith: '#070b16', horizon: '#18202f', ground: '#0c0d0f', sun: 0, sky: 0.05, env: 0.06, tint: '#ffffff', skyTint: '#8fa3c8' };
@@ -81,10 +88,46 @@ export const MINUTES = [0, 1, 5, 15, 60];   // 0 = no limit
 
 export const DEFAULTS = Object.freeze({
   mode: 'fast', minutes: 5,
+  engine: '',         // 0.8 RE.1 (engines.js): the engine's id; '' = the built-in the mode names (fast | pt)
+  engineOpts: {},     // engine id → that engine's own settings (typed fields, cleaned by the engine's list when it is drawn)
   size: 'view2', quality: 'good', sky: 'clear', exposure: 0, edges: false, ground: true,
   sun: null,          // null = the model's own sun (its place, date and time); else {month, day, hour} for this render
   looks: {},          // '#rrggbb' | 'default' → a LOOK_KEYS name
+  turbidity: 3,       // 0.7 RN.3: the physical sky's haze, 2 (very clear) … 10 (hazy)
+  envRotation: 0,     // the sky picture turned about up, degrees
+  envExposure: 0,     // the sky picture's brightness, stops
+  hdriName: '',       // the sky picture's file name (the picture itself is kept for the session, not in settings)
+  ies: {},            // lamp name → {file, text}: an IES (LM-63) light profile for the lamps of that name
+  // 0.7 RN.4, the physical camera (pt-camera.js; the path tracer on the graphics card, except exposure which every engine uses)
+  exposureMode: 'slider',   // 'slider' (the Brightness slider only) | 'camera' (f-stop, shutter and ISO set it, + the slider)
+  fstop: 8, shutter: 1 / 125, iso: 100,
+  dof: false,         // depth of field: a lens of the f-stop's opening
+  focus: 0,           // metres; 0 = what is in the middle of the view
+  blades: 0,          // aperture blades: 0 round, 5–9
+  bladeRot: 0,        // degrees
+  twoPoint: false,    // two-point perspective (vertical lines stay vertical)
+  whiteBalance: 6500, // kelvin: the light colour that shows as white
+  projection: 'normal',   // 'normal' | 'equirect' (360° panorama) | 'stereo' (360° stereo) | 'cube' (cube map)
+  // 0.7 RN.6 (pt-mix.js): render elements and light mixing after the render (graphics card); the mix and named mixes
+  elements: false, lightMix: false,
+  denoise: true,      // 0.7 RN.5: denoise high-quality pictures (Open Image Denoise's network, our own inference)
+  mix: {},            // light group key → {on, color, stops}
+  mixPresets: {},     // name → a mix
+  post: POST_DEFAULTS,  // 0.7 RN.8 (pt-post.js): view transform, contrast, highlights, bloom, glare, vignette, LUT
+  // 0.7 RN.7 (pt-volume.js; the graphics card and the reference tracer): fog with light shafts, one smoke or cloud volume, adaptive sampling, caustics
+  fog: Object.freeze({ on: false, visibility: 300, top: 40, g: 0.5, color: '#ffffff' }),   // metres of sight, the layer's height above the ground, the light's forward lean (−0.9 … 0.9)
+  volume: Object.freeze({ on: false, kind: 'cloud', name: '', dx: 0, dy: 0, dz: 0, size: 0, yaw: 0, density: 0.5, g: 0.3, color: '#ffffff', res: 48, seed: 1 }),   // size 0 = the model's size
+  adaptive: Object.freeze({ on: false, noise: 0.02, min: 16 }),
+  caustics: false,    // light tracing for the light that bends through glass or bounces off mirrors onto surfaces
 });
+export const VOLUME_KINDS = ['cloud', 'plume', 'file'];
+export const VOLUME_RES = [24, 32, 48, 64, 96];
+export const CAM_FSTOPS = [1.4, 2, 2.8, 4, 5.6, 8, 11, 16, 22];
+export const CAM_SHUTTERS = [1 / 4000, 1 / 2000, 1 / 1000, 1 / 500, 1 / 250, 1 / 125, 1 / 60, 1 / 30, 1 / 15, 1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 15, 30];
+export const CAM_ISOS = [50, 100, 200, 400, 800, 1600, 3200, 6400];
+export const CAM_BLADES = [0, 5, 6, 7, 8, 9];
+export const PROJECTIONS = ['normal', 'equirect', 'stereo', 'cube'];
+export const IES_MAX_TEXT = 262144, IES_MAX_LAMPS = 32;
 
 const HEX = /^#[0-9a-f]{6}$/;
 export function colorKey(c) {
@@ -95,7 +138,48 @@ export function colorKey(c) {
 }
 
 const num = (v, lo, hi, d) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d);
+/** The list value nearest v (a typed or older value snaps to a real stop), else d. */
+const nearest = (v, list, d) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? list.reduce((b, x) => (Math.abs(Math.log(x / v)) < Math.abs(Math.log(b / v)) ? x : b), list[0]) : d);
 const pick = (v, table, d) => (typeof v === 'string' && Object.prototype.hasOwnProperty.call(table, v) ? v : d);
+
+const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+/** 0.7 RN.7 */
+function cleanFog(v) {
+  const o = obj(v), d = DEFAULTS.fog;
+  return { on: o.on === true, visibility: Math.round(num(o.visibility, 5, 20000, d.visibility)), top: Math.round(num(o.top, 1, 5000, d.top) * 10) / 10, g: Math.round(num(o.g, -0.9, 0.9, d.g) * 20) / 20, color: colorKey(o.color) || d.color };
+}
+function cleanVolume(v) {
+  const o = obj(v), d = DEFAULTS.volume;
+  return {
+    on: o.on === true, kind: VOLUME_KINDS.includes(o.kind) ? o.kind : d.kind,
+    name: typeof o.name === 'string' ? o.name.replace(/[\u0000-\u001f]/g, '').slice(0, 120) : '',
+    dx: Math.round(num(o.dx, -5000, 5000, 0) * 100) / 100, dy: Math.round(num(o.dy, -5000, 5000, 0) * 100) / 100, dz: Math.round(num(o.dz, -5000, 5000, 0) * 100) / 100,
+    size: Math.round(num(o.size, 0, 10000, 0) * 100) / 100, yaw: Math.round(num(o.yaw, -180, 180, 0)),
+    density: Math.round(num(o.density, 0.001, 50, d.density) * 1000) / 1000, g: Math.round(num(o.g, -0.9, 0.9, d.g) * 20) / 20,
+    color: colorKey(o.color) || d.color, res: VOLUME_RES.includes(o.res) ? o.res : d.res, seed: Math.round(num(o.seed, 1, 9999, 1)),
+  };
+}
+function cleanAdaptive(v) {
+  const o = obj(v), d = DEFAULTS.adaptive;
+  return { on: o.on === true, noise: Math.round(num(o.noise, 0.002, 0.2, d.noise) * 1000) / 1000, min: Math.round(num(o.min, 8, 256, d.min) / 4) * 4 };
+}
+
+/** Engine id → {key: scalar}: at most 8 engines × 24 keys; scalars only (strings ≤ 200 characters). Each engine's own list narrows it further. */
+function cleanEngineOptsMap(v) {
+  const out = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const id of Object.keys(v).slice(0, 8)) {
+    const e = v[id];
+    if (!cleanEngineId(id) || !e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const o = {};
+    for (const k of Object.keys(e).slice(0, 24)) {
+      const x = e[k];
+      if (/^[a-zA-Z][a-zA-Z0-9_]{0,31}$/.test(k) && (typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x)) || typeof x === 'string')) o[k] = typeof x === 'string' ? x.replace(/[\u0000-\u001f]/g, '').slice(0, 200) : x;
+    }
+    out[id] = o;
+  }
+  return out;
+}
 
 /** Settings from anything (a file, localStorage): a fresh object with only known keys and sane values. */
 export function cleanSettings(obj) {
@@ -103,6 +187,8 @@ export function cleanSettings(obj) {
   const s = {
     mode: MODES.includes(o.mode) ? o.mode : DEFAULTS.mode,
     minutes: MINUTES.includes(o.minutes) ? o.minutes : DEFAULTS.minutes,
+    engine: cleanEngineId(o.engine),
+    engineOpts: cleanEngineOptsMap(o.engineOpts),
     size: pick(o.size, SIZES, DEFAULTS.size),
     quality: pick(o.quality, QUALITY, DEFAULTS.quality),
     sky: pick(o.sky, SKIES, DEFAULTS.sky),
@@ -111,7 +197,47 @@ export function cleanSettings(obj) {
     ground: o.ground !== false,
     sun: null,
     looks: {},
+    turbidity: Math.round(num(o.turbidity, 2, 10, DEFAULTS.turbidity) * 2) / 2,
+    envRotation: Math.round(num(o.envRotation, -180, 180, 0)),
+    envExposure: Math.round(num(o.envExposure, -5, 5, 0) * 2) / 2,
+    hdriName: typeof o.hdriName === 'string' ? o.hdriName.replace(/[\u0000-\u001f]/g, '').slice(0, 120) : '',
+    ies: {},
+    exposureMode: o.exposureMode === 'camera' ? 'camera' : 'slider',
+    fstop: nearest(o.fstop, CAM_FSTOPS, DEFAULTS.fstop),
+    shutter: nearest(o.shutter, CAM_SHUTTERS, DEFAULTS.shutter),
+    iso: nearest(o.iso, CAM_ISOS, DEFAULTS.iso),
+    dof: o.dof === true,
+    focus: Math.round(num(o.focus, 0, 10000, 0) * 100) / 100,
+    blades: CAM_BLADES.includes(o.blades) ? o.blades : 0,
+    bladeRot: Math.round(num(o.bladeRot, 0, 360, 0)),
+    twoPoint: o.twoPoint === true,
+    whiteBalance: Math.round(num(o.whiteBalance, 2000, 12000, 6500) / 100) * 100,
+    projection: PROJECTIONS.includes(o.projection) ? o.projection : 'normal',
+    elements: o.elements === true,
+    denoise: o.denoise !== false,
+    lightMix: o.lightMix === true,
+    mix: cleanMix(o.mix),
+    mixPresets: {},
+    post: cleanPost(o.post),
+    fog: cleanFog(o.fog),
+    volume: cleanVolume(o.volume),
+    adaptive: cleanAdaptive(o.adaptive),
+    caustics: o.caustics === true,
   };
+  if (o.mixPresets && typeof o.mixPresets === 'object' && !Array.isArray(o.mixPresets)) {
+    for (const [name, m] of Object.entries(o.mixPresets).slice(0, MAX_PRESETS)) {
+      const nm = typeof name === 'string' ? name.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) : '';
+      if (nm) s.mixPresets[nm] = cleanMix(m);
+    }
+  }
+  if (o.ies && typeof o.ies === 'object' && !Array.isArray(o.ies)) {
+    let n = 0;
+    for (const [name, v] of Object.entries(o.ies)) {
+      if (typeof name !== 'string' || !name || name.length > 120 || !v || typeof v.text !== 'string' || v.text.length > IES_MAX_TEXT) continue;
+      s.ies[name] = { file: typeof v.file === 'string' ? v.file.slice(0, 120) : '', text: v.text };
+      if (++n >= IES_MAX_LAMPS) break;
+    }
+  }
   if (o.sun && typeof o.sun === 'object') {
     const m = Math.round(num(o.sun.month, 1, 12, NaN)), d = Math.round(num(o.sun.day, 1, 31, NaN)), h = num(o.sun.hour, 0, 24, NaN);
     if (Number.isFinite(m) && Number.isFinite(d) && Number.isFinite(h)) s.sun = { month: m, day: Math.min(d, [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]), hour: Math.round(h * 4) / 4 };
@@ -139,6 +265,9 @@ export function sizeFor(settings, viewW, viewH) {
   const z = SIZES[settings?.size] || SIZES[DEFAULTS.size];
   let w, h;
   if (z.scale) { w = Math.round(Math.max(1, viewW) * z.scale); h = Math.round(Math.max(1, viewH) * z.scale); } else { w = z.w; h = z.h; }
+  // RN.4: a panorama is 2:1, a stereo panorama 1:1 (two 2:1 eyes), a cube map 3:2 — on the size's width (high quality only)
+  const pr = settings?.mode === 'hq' ? settings?.projection : 'normal';
+  if (pr === 'equirect') h = Math.round(w / 2); else if (pr === 'stereo') h = w; else if (pr === 'cube') h = Math.round((w * 2) / 3);
   const k = Math.min(1, MAX_SIDE / w, MAX_SIDE / h);
   return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
 }

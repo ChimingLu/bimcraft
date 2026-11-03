@@ -23,6 +23,7 @@
  */
 import { op, settleFor } from './model-ops.js';
 import { readWalls, addWall, wallType, typeAt, typeThickness } from './model-walls.js';
+import { addLevel } from './model-levels.js';
 import { addOpening, openingType } from './model-openings.js';
 import { axisMeet } from './model-trim.js';
 import { ids, val } from './ifc-util.js';
@@ -229,42 +230,74 @@ export function openingsFromInserts(inserts, map, walls) {
 // ------------------------------------------------------------------------------------------------------------- the op
 const pts2 = (w, flat) => { const out = []; for (let i = 0; i + 1 < flat.length; i += 2) out.push([w.u(flat[i]), w.u(flat[i + 1])]); return out; };
 export function traceDrawing({ storey, walls, openings = [], typeKey = 'ext-2x6', topLevel = '', height = 0, underlay = null }) {
+  const state = pageState();
+  return op((w) => traceInto(w, { storey, walls, openings, typeKey, topLevel, height, underlay }, state));
+}
+const pageState = () => ({ guids: [], oguids: [], ug: null });
+
+/** One page of walls, openings and an underlay written into a level (a storey GlobalId); the state keeps the GlobalIds so a redo makes the same elements. */
+function traceInto(w, { storey, walls, openings = [], typeKey = 'ext-2x6', topLevel = '', height = 0, underlay = null }, state) {
   const W = walls.map((x) => ({ a: [...x.a], b: [...x.b], t: x.t })), O = openings.map((x) => ({ ...x })), U = underlay;
-  const guids = [], oguids = [];
-  let ug = null;
+  const { guids, oguids } = state;
+  const st = w.byGuid(storey);
+  if (!st) refuse('model.err.nolevel');
+  if (!W.length && !U) refuse('model.err.trace.none');
+  const base = wallType(typeKey) || wallType('ext-2x6'), t0 = typeThickness(base);
+  const made = new Map(), out = [];
+  W.forEach((x, i) => {
+    if (!guids[i]) guids[i] = val(w.guid());
+    const key = Math.abs(x.t - t0) > 1 ? (typeAt(base.key, Math.round(x.t)) || base.key) : base.key;
+    const r = addWall(w, { storey: st, a: x.a, b: x.b, typeKey: key, topLevel, height: topLevel ? 0 : height, extSide: 'left', guid: guids[i] });
+    made.set(r.guid, r.id); out.push(r.id);
+  });
+  if (W.length) settleFor(w, [st], null);   // joins first, so openings fit the walls as joined
+  let skipped = 0;
+  O.forEach((o, i) => {
+    if (!guids[o.wall]) { skipped++; return; }
+    if (!oguids[i]) oguids[i] = [val(w.guid()), val(w.guid())];
+    try { addOpening(w, { wall: guids[o.wall], typeKey: o.typeKey, offset: o.offset, width: o.width, face: o.face, guid: oguids[i][0], openingGuid: oguids[i][1] }); }
+    catch (e) { if (/^model\.err\./.test(e.key || '')) skipped++; else throw e; }
+  });
+  if (O.length) settleFor(w, [st], null);
+  if (U?.lines?.length) {
+    if (!state.ug) state.ug = val(w.guid());
+    const sl = w.api.GetLine(w.mid, st, false);
+    const name = w.L(String(U.name || 'drawing').slice(0, 120));
+    const id = w.make('IFCANNOTATION', state.ug, w.ownerHistory(), name, null, w.L('Underlay'), w.H(w.placeAt(sl.ObjectPlacement.value, 0, 0, 0, 0)), null, ...(/^IFC4X3/i.test(w.schema || '') ? ['USERDEFINED'] : []));   // i18n-ignore: IFC ObjectType (IFC4X3 adds PredefinedType)
+    const curves = U.lines.map((flat) => w.H(w.make('IFCPOLYLINE', pts2(w, flat).map(([x, y]) => w.H(w.point2(round(x), round(y)))))));
+    w.setShape(id, [w.rep('foot', 'Annotation', 'GeometricCurveSet', [w.make('IFCGEOMETRICCURVESET', curves)])]);
+    w.contain(id, st);
+    w.upsertPset(id, UNDERLAY_PSET, [['Source', 'IFCLABEL', String(U.name || '').slice(0, 255)], ['Units', 'IFCLABEL', String(U.units || '')], ['Lines', 'IFCINTEGER', U.lines.length]]);
+    out.push(id);
+  }
+  return { id: out[0] ?? null, ids: out, made, skipped };
+}
+
+/**
+ * DC.116: the pages of a set of plans in ONE undo step. pages: [{ level: GlobalId | { name, elevation, height } (a level made for the page),
+ * walls, openings, typeKey, height, underlay, topLevel? }]; a page whose level is new is put above the levels there are. A page with
+ * no walls and no underlay is skipped. → op (result: ids, made, skipped, levels: [GlobalId per page])
+ */
+export function tracePages(pages) {
+  const states = pages.map(() => pageState());
   return op((w) => {
-    const st = w.byGuid(storey);
-    if (!st) refuse('model.err.nolevel');
-    if (!W.length && !U) refuse('model.err.trace.none');
-    const base = wallType(typeKey) || wallType('ext-2x6'), t0 = typeThickness(base);
-    const made = new Map(), out = [];
-    W.forEach((x, i) => {
-      if (!guids[i]) guids[i] = val(w.guid());
-      const key = Math.abs(x.t - t0) > 1 ? (typeAt(base.key, Math.round(x.t)) || base.key) : base.key;
-      const r = addWall(w, { storey: st, a: x.a, b: x.b, typeKey: key, topLevel, height: topLevel ? 0 : height, extSide: 'left', guid: guids[i] });
-      made.set(r.guid, r.id); out.push(r.id);
-    });
-    if (W.length) settleFor(w, [st], null);   // joins first, so openings fit the walls as joined
+    const ids = [], made = new Map(), levels = [];
     let skipped = 0;
-    O.forEach((o, i) => {
-      if (!guids[o.wall]) { skipped++; return; }
-      if (!oguids[i]) oguids[i] = [val(w.guid()), val(w.guid())];
-      try { addOpening(w, { wall: guids[o.wall], typeKey: o.typeKey, offset: o.offset, width: o.width, face: o.face, guid: oguids[i][0], openingGuid: oguids[i][1] }); }
-      catch (e) { if (/^model\.err\./.test(e.key || '')) skipped++; else throw e; }
+    pages.forEach((p, i) => {
+      if (!p.walls.length && !p.underlay) { levels.push(null); return; }
+      let storey = p.level;
+      if (storey && typeof storey === 'object') {
+        if (!states[i].level) states[i].level = val(w.guid());
+        const r = addLevel(w, { name: storey.name, elevation: storey.elevation, height: storey.height, guid: states[i].level });
+        storey = r.guid;
+      }
+      levels.push(storey);
+      const r = traceInto(w, { ...p, storey }, states[i]);
+      for (const x of r.ids) ids.push(x);
+      for (const [g, id] of r.made) made.set(g, id);
+      skipped += r.skipped;
     });
-    if (O.length) settleFor(w, [st], null);
-    if (U?.lines?.length) {
-      if (!ug) ug = val(w.guid());
-      const sl = w.api.GetLine(w.mid, st, false);
-      const name = w.L(String(U.name || 'drawing').slice(0, 120));
-      const id = w.make('IFCANNOTATION', ug, w.ownerHistory(), name, null, w.L('Underlay'), w.H(w.placeAt(sl.ObjectPlacement.value, 0, 0, 0, 0)), null, ...(/^IFC4X3/i.test(w.schema || '') ? ['USERDEFINED'] : []));   // i18n-ignore: IFC ObjectType (IFC4X3 adds PredefinedType)
-      const curves = U.lines.map((flat) => w.H(w.make('IFCPOLYLINE', pts2(w, flat).map(([x, y]) => w.H(w.point2(round(x), round(y)))))));
-      w.setShape(id, [w.rep('foot', 'Annotation', 'GeometricCurveSet', [w.make('IFCGEOMETRICCURVESET', curves)])]);
-      w.contain(id, st);
-      w.upsertPset(id, UNDERLAY_PSET, [['Source', 'IFCLABEL', String(U.name || '').slice(0, 255)], ['Units', 'IFCLABEL', String(U.units || '')], ['Lines', 'IFCINTEGER', U.lines.length]]);
-      out.push(id);
-    }
-    return { id: out[0] ?? null, ids: out, made, skipped };
+    return { id: ids[0] ?? null, ids, made, skipped, levels };
   });
 }
 

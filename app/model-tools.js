@@ -116,8 +116,9 @@ export function loopArea(points) { let s = 0; for (let i = 0; i < points.length;
 export const loopSide = (points) => (loopArea(points) > 0 ? 'right' : 'left');
 
 /** Centre lines for a path drawn on a wall face. Outside is explicitly left/right of travel. */
-export function wallPath(points, thickness, reference = 'center', side = 'left') {
-  const off = reference === 'center' ? 0 : thickness / 2 * (reference === 'outside' ? -1 : 1) * (side === 'left' ? 1 : -1);
+export function wallPath(points, thickness, reference = 'center', side = 'left', axisOffset = undefined) {
+  // Optional authoritative location-line offset; retain the established face-chain/miter algorithm.
+  const off = axisOffset ?? (reference === 'center' ? 0 : thickness / 2 * (reference === 'outside' ? -1 : 1) * (side === 'left' ? 1 : -1));
   const segs = [];
   for (let i = 1; i < points.length; i++) {
     const a = points[i - 1], b = points[i], L = dist(a, b);

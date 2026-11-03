@@ -10,18 +10,29 @@
  *   COMMANDS     [{ id, group, label (text key), icon, sel, defKeys: ['Ctrl+Z', …], fixed?, keyOnly?, optional? }]
  *                `fixed` = keys nobody may take (Delete, Esc); `keyOnly` = no menu place needed; `optional` = only in some
  *                areas; `sel` = the app's own button the command clicks (one code path for every style)
- *   GROUPS       group ids, in the order the Customize list shows them (names: text keys input.grp.<id>)
+ *                0.7.1 (MC-KEYS-META): `keep` = while a style gives the command no key, its own keys (defKeys) stay its own
+ *                (never "moved"), so a style saved before the command existed keeps them; `essential` = keep + Customize warns
+ *                when it has no key (Esc: cancel) and offers the default back; `whileBusy` = its key still runs while the
+ *                app's tool is busy (axis lock, cancel). A non-fixed `keep` command may own Esc or an arrow key: only those
+ *                of the pass-through keys reach a style (`rebindable()`), every other app's Esc and arrows pass as before.
+ *   GROUPS      group ids, in the order the Customize list shows them (names: text keys input.grp.<id>)
  *   STYLES       { id: built-in profile }, STYLE_ORDER [ids]; the first is the app's own (nothing changes in it)
  *   FAMILY       { styleId: 'own' | 'menus' | 'ribbon' | 'classic' } (IP.4: "use this style in every app")
  *   optional: STORE (localStorage key, default '<slug>.input'), CARRY (WL.18, below), MACROS (true: keys may type text
- *   at the app's command line), hooks(ctx) (page side; see app-input-ui.js)
+ *   at the app's command line), MOUSE_MENU (0.7.1: true = the app's 3D view has a context menu, so 'menu' is a choice for
+ *   the middle and right buttons; elsewhere it is dropped from files), hooks(ctx) (page side; see app-input-ui.js)
  *
  * A profile is data only:
  *   { format: 'cadcraft-input', version: 1, id, name, base?,
  *     layout: 'toolbar' | 'menubar' | 'ribbon',  commandLine: bool,
  *     menus:  [{ label, items: [id | '-'] }]                       menubar (a ribbon's File menu too)
  *     bar:    [id | '-']                                            menubar: the quick row under the menus
- *     tabs:   [{ label, panels: [{ label, items: [id] }] }]       ribbon
+ *     tabs:   [{ label, panels: [{ label, items: [item], more?: [id], mixed?: bool }] }]       ribbon
+ *       item (0.7 RIBBON-COMPACT): an id (a large button, as before) | { id, size?: 'lg' | 'sm' } | { split: [id, id…], size? }
+ *         (the last one used is the face, a small arrow lists the rest) | { control: 'name', size? } (an inline control the app's
+ *         hook draws: layer list, colour, …). `size` lg = icon over label, sm = small icon + label, three stacked. A panel with any
+ *         explicit size (or `mixed: true`) is a mixed group: items without a size are lg when first, sm after; a panel with none
+ *         draws every button large, as before. `more`: extra tools the group's arrow (by its name, at the bottom) lists.
  *     quick:  [id]                                                  ribbon: the quick-access row
  *     labels: { id: text key }                                      built-ins only (the app translates them)
  *     keys:   { id: ['W', 'Ctrl+Shift+V', 'W A'] }                  a space = a sequence ("WA": W then A)
@@ -39,8 +50,10 @@ export const EXT = '.ccinput.json';
 export const LAYOUTS = ['toolbar', 'menubar', 'ribbon'];
 export const BUTTONS = ['left', 'middle', 'right'];
 export const ACTIONS_3D = ['orbit', 'pan', 'zoom', 'none'];
+/** 0.7.1: a click of the button opens the context menu for what is under the pointer (registries with MOUSE_MENU; never the left). */
+export const MENU_ACTION = 'menu';
 export const MOUSE_DEFAULT = Object.freeze({ wheel: 1, zoomSpeed: 1, pan2d: ['middle', 'right'], orbit3d: { left: 'orbit', middle: 'zoom', right: 'pan' } });
-export const LIMITS = Object.freeze({ name: 40, label: 40, menus: 16, items: 80, tabs: 12, panels: 12, keysPerCommand: 3, words: 4, word: 16, macros: 300, macro: 200, custom: 20, bytes: 200000 });
+export const LIMITS = Object.freeze({ name: 40, label: 40, menus: 16, items: 80, split: 6, more: 40, control: 32, tabs: 12, panels: 12, keysPerCommand: 3, words: 4, word: 16, macros: 300, macro: 200, custom: 20, bytes: 200000 });
 /** IP.4: the style families every app can answer ("use this style in every app"). 'own' = each app's own toolbar. */
 export const FAMILIES = ['own', 'menus', 'ribbon', 'classic'];
 /** IP.4: where the family for every app is kept (one origin: every app in the browser, the hub and every app in Studio). */
@@ -137,15 +150,20 @@ export function resolve(p, builtins) {
   return out;
 }
 
-/** The mouse settings, every field present and in range. */
-export function cleanMouse(m) {
+/** The mouse settings, every field present and in range. opts.menu false (a file for an app without MOUSE_MENU): 'menu' is
+ *  dropped; it is never kept for the left button. */
+export function cleanMouse(m, opts) {
   const o = m && typeof m === 'object' ? m : {};
   const pan2d = Array.isArray(o.pan2d) ? [...new Set(o.pan2d.filter((b) => BUTTONS.includes(b)))] : MOUSE_DEFAULT.pan2d.slice();
+  const menuOk = !(opts && opts.menu === false);
   // orbit3d null = every 3D view keeps its own buttons (the app's own style)
   let orbit3d = null;
   if (o.orbit3d && typeof o.orbit3d === 'object') {
     orbit3d = {};
-    for (const b of BUTTONS) orbit3d[b] = ACTIONS_3D.includes(o.orbit3d[b]) ? o.orbit3d[b] : MOUSE_DEFAULT.orbit3d[b];
+    for (const b of BUTTONS) {
+      const v = o.orbit3d[b];
+      orbit3d[b] = ACTIONS_3D.includes(v) || (v === MENU_ACTION && menuOk && b !== 'left') ? v : MOUSE_DEFAULT.orbit3d[b];
+    }
   }
   const zs = Number(o.zoomSpeed);
   return { wheel: o.wheel === -1 ? -1 : 1, zoomSpeed: Number.isFinite(zs) ? Math.min(4, Math.max(0.25, zs)) : 1, pan2d, orbit3d };
@@ -187,6 +205,35 @@ export function conflicts(p, registry = []) {
   return out;
 }
 
+/** 0.7 RIBBON-COMPACT: the sizes a ribbon item may say, and the command ids one item holds (a split holds several). */
+export const SIZES = ['lg', 'sm'];
+export const CONTROL_RE = /^[a-z][a-z0-9-]{0,31}$/;
+export function itemIds(it) {
+  if (typeof it === 'string') return it === '-' ? [] : [it];
+  if (!it || typeof it !== 'object') return [];
+  if (Array.isArray(it.split)) return it.split.filter((x) => typeof x === 'string');
+  return typeof it.id === 'string' ? [it.id] : [];
+}
+/** Is a command anywhere in a ribbon panel: an item, a split, or the group's `more` list. */
+export function panelHas(pn, id) {
+  return !!pn && ((pn.items || []).some((it) => itemIds(it).includes(id)) || (pn.more || []).includes(id));
+}
+/** The ribbon panel's items with sizes settled: [{kind: 'cmd'|'split'|'control', id|ids|name, size: 'lg'|'sm'}]. A panel that says no size anywhere
+ *  (and is not `mixed`) is all large — today's look. Otherwise an item with no size is lg when first and sm after. */
+export function panelLayout(pn) {
+  const items = (pn && pn.items) || [];
+  const said = items.some((it) => it && typeof it === 'object' && SIZES.includes(it.size));
+  const mixed = said || (pn && pn.mixed === true);
+  return items.map((it, i) => {
+    const o = typeof it === 'string' ? {} : (it || {});
+    const kind = Array.isArray(o.split) ? 'split' : (typeof o.control === 'string' ? 'control' : 'cmd');
+    const size = SIZES.includes(o.size) ? o.size : (mixed ? (i === 0 ? 'lg' : 'sm') : 'lg');
+    if (kind === 'split') return { kind, ids: o.split, size };
+    if (kind === 'control') return { kind, name: o.control, size };
+    return { kind, id: typeof it === 'string' ? it : o.id, size };
+  }).filter((x) => x.kind !== 'cmd' || x.id);
+}
+
 /** Where a command sits in a profile ("Build", "Architecture\0Build", '@bar', '@quick'), or '' when only keys reach it. */
 export function placeOf(p, id) {
   if (!p) return '';
@@ -195,7 +242,7 @@ export function placeOf(p, id) {
   }
   if (p.layout === 'menubar' && (p.bar || []).includes(id)) return '@bar';
   if (p.layout === 'ribbon' && (p.quick || []).includes(id)) return '@quick';
-  if (p.layout === 'ribbon') for (const tab of p.tabs || []) for (const pn of tab.panels || []) if ((pn.items || []).includes(id)) return tab.label + '\u0000' + pn.label;
+  if (p.layout === 'ribbon') for (const tab of p.tabs || []) for (const pn of tab.panels || []) if (panelHas(pn, id)) return tab.label + '\u0000' + pn.label;
   return '';
 }
 
@@ -211,7 +258,18 @@ export function moveCommand(p, id, where) {
   const q = copy(p);
   for (const m of q.menus || []) m.items = (m.items || []).filter((x) => x !== id);
   if (q.bar) q.bar = q.bar.filter((x) => x !== id);
-  for (const tab of q.tabs || []) for (const pn of tab.panels || []) pn.items = (pn.items || []).filter((x) => x !== id);
+  for (const tab of q.tabs || []) for (const pn of tab.panels || []) {
+    pn.items = (pn.items || []).flatMap((it) => {
+      if (it === id) return [];
+      if (it && typeof it === 'object' && it.id === id) return [];
+      if (it && typeof it === 'object' && Array.isArray(it.split)) {
+        const rest = it.split.filter((x) => x !== id);
+        return rest.length >= 2 ? [{ ...it, split: rest }] : (rest.length === 1 ? [it.size ? { id: rest[0], size: it.size } : rest[0]] : []);
+      }
+      return [it];
+    });
+    if (pn.more) pn.more = pn.more.filter((x) => x !== id);
+  }
   if (where === null || where === undefined || where === '') return tidy(q);
   if (q.layout === 'menubar' || (q.layout === 'ribbon' && String(where).startsWith('m'))) {
     const i = Number(String(where).replace(/^m/, ''));
@@ -256,7 +314,8 @@ const regOpts = (opts) => (opts && typeof opts === 'object' ? opts : {});
 /**
  * A profile from a file, an add-on or another tab, checked as untrusted: unknown commands and fields are dropped (and
  * listed), keys normalised, words upper case letters/digits, names cut to length; built-in labels never come from a file.
- * opts.macros: keep text keys (else they are dropped and listed). → { ok, profile, problems: [text] }
+ * opts.macros: keep text keys (else they are dropped and listed); opts.menu: keep the 'menu' mouse action (MOUSE_MENU).
+ * → { ok, profile, problems: [text] }
  */
 export function validateProfile(obj, registry, builtins, opts) {
   const o = regOpts(opts);
@@ -285,10 +344,36 @@ export function validateProfile(obj, registry, builtins, opts) {
   if (Array.isArray(obj.menus)) out.menus = obj.menus.slice(0, LIMITS.menus).map((m) => ({ label: label(m && m.label), items: ids(m && m.items, LIMITS.items) }));
   if (Array.isArray(obj.bar)) out.bar = ids(obj.bar, LIMITS.items);
   if (Array.isArray(obj.quick)) out.quick = ids(obj.quick, 12).filter((x) => x !== '-');
+  // 0.7 RIBBON-COMPACT: a ribbon item is an id, { id, size }, { split: [ids] } or { control: name }; sizes lg | sm, anything else is dropped and listed
+  const panelItems = (list) => {
+    const r = [], seen = new Set();
+    const sizeOf = (x) => { if (x.size === undefined) return undefined; if (SIZES.includes(x.size)) return x.size; problems.push('size'); return undefined; };
+    for (const x of (Array.isArray(list) ? list : []).slice(0, LIMITS.items)) {
+      if (typeof x === 'string') { if (x !== '-' && known.has(x) && !seen.has(x)) { seen.add(x); r.push(x); } else if (x !== '-' && !known.has(x)) problems.push('unknown:' + str(x, 40)); continue; }
+      if (!x || typeof x !== 'object' || Array.isArray(x)) { problems.push('item'); continue; }
+      const size = sizeOf(x), sz = size ? { size } : {};
+      if (Array.isArray(x.split)) {
+        const sp = [];
+        for (const y of x.split.slice(0, LIMITS.split)) { if (typeof y === 'string' && known.has(y)) { if (!seen.has(y) && !sp.includes(y)) sp.push(y); } else problems.push('unknown:' + str(String(y), 40)); }
+        sp.forEach((y) => seen.add(y));
+        if (sp.length >= 2) r.push({ split: sp, ...sz }); else if (sp.length === 1) r.push(size ? { id: sp[0], size } : sp[0]);
+      } else if (typeof x.control === 'string') {
+        if (CONTROL_RE.test(x.control)) r.push({ control: x.control, ...sz }); else problems.push('control');
+      } else if (typeof x.id === 'string') {
+        if (known.has(x.id)) { if (!seen.has(x.id)) { seen.add(x.id); r.push(size ? { id: x.id, size } : x.id); } } else problems.push('unknown:' + str(x.id, 40));
+      } else problems.push('item');
+    }
+    return r;
+  };
   if (Array.isArray(obj.tabs)) {
     out.tabs = obj.tabs.slice(0, LIMITS.tabs).map((tb) => ({
       label: label(tb && tb.label),
-      panels: (Array.isArray(tb && tb.panels) ? tb.panels : []).slice(0, LIMITS.panels).map((pn) => ({ label: label(pn && pn.label), items: ids(pn && pn.items, LIMITS.items).filter((x) => x !== '-') })),
+      panels: (Array.isArray(tb && tb.panels) ? tb.panels : []).slice(0, LIMITS.panels).map((pn) => {
+        const o2 = { label: label(pn && pn.label), items: panelItems(pn && pn.items) };
+        if (pn && Array.isArray(pn.more)) { const mo = ids(pn.more, LIMITS.more).filter((x) => x !== '-'); if (mo.length) o2.more = mo; }
+        if (pn && pn.mixed === true) o2.mixed = true;
+        return o2;
+      }),
     }));
   }
   if (obj.keys && typeof obj.keys === 'object') {
@@ -321,7 +406,7 @@ export function validateProfile(obj, registry, builtins, opts) {
       }
     }
   }
-  if (obj.mouse !== undefined) out.mouse = cleanMouse(obj.mouse);
+  if (obj.mouse !== undefined) out.mouse = cleanMouse(obj.mouse, { menu: !!o.menu });
   for (const c of conflicts(out, registry)) problems.push('conflict:' + c.seq);
   return { ok: true, profile: out, problems: [...new Set(problems)] };
 }
@@ -368,6 +453,7 @@ export class KeyMatcher {
     for (const c of registry) for (const k of c.defKeys || []) { const q = normSeq(k); if (q && !this.def.has(q)) this.def.set(q, c.id); }
     this.mine = new Map();   // command → its keys in this profile
     for (const [seq, id] of this.map) { if (!this.mine.has(id)) this.mine.set(id, []); this.mine.get(id).push(seq); }
+    this.keep = new Set(registry.filter((c) => (c.keep || c.essential) && !c.fixed).map((c) => c.id));   // 0.7.1: defaults kept while unbound
     this.buf = [];
   }
   reset() { this.buf = []; }
@@ -391,9 +477,30 @@ export class KeyMatcher {
     this.buf = [];
     if (r) return r;
     const d = this.def.get(combo);
-    if (d && !this.map.has(combo)) return { blocked: d };
+    if (d && !this.map.has(combo) && !(this.keep.has(d) && !this.mine.has(d))) return { blocked: d };   // a `keep` command with no key keeps its own
     return null;
   }
+}
+
+/** 0.7.1: the keys every app lets through untouched (fields, menus and the apps' own handling need them) … */
+export const PASS_KEYS = Object.freeze(['Escape', 'Enter', 'Tab', 'Delete', 'Backspace', 'Space', 'Shift+Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+/** … and which of them this registry lets a style take: the default keys of its non-fixed `keep` / `essential` commands
+ *  (ModelCraft's Esc and arrows). Empty for a registry without such commands: nothing changes there. */
+export function rebindable(registry) {
+  const out = new Set();
+  for (const c of registry || []) if ((c.keep || c.essential) && !c.fixed) for (const k of c.defKeys || []) { const q = normSeq(k); if (q && PASS_KEYS.includes(q)) out.add(q); }
+  return out;
+}
+/** 0.7.1: the `essential` commands a profile gives no key (Customize warns: nothing would cancel). */
+export function missingEssential(p, registry) {
+  return (registry || []).filter((c) => c.essential && !c.fixed && !((p && p.keys && p.keys[c.id]) || []).some((k) => normSeq(k))).map((c) => c.id);
+}
+/** 0.7.1: a command's keys in a style's built-in base (what "Default" puts back): the base style's, else the registry's. */
+export function defaultKeysOf(p, builtins, cmd) {
+  const b = p && (p.builtin ? p.id : p.base);
+  const base = b && own(builtins, b) ? builtins[b] : null;
+  const ks = base && base.keys && own(base.keys, cmd.id) ? base.keys[cmd.id] : (cmd.defKeys || []);
+  return ks.map(normSeq).filter(Boolean);
 }
 
 /** A typed command-line word → command id, or null. Exact words first, then a unique start ("WIN" → WINDOW). */
@@ -415,11 +522,11 @@ export function matchTyped(p, word) {
  * reg = the registry module (COMMANDS, STYLES, STYLE_ORDER, MACROS).
  */
 export function readState(text, reg) {
-  const st = { style: reg.STYLE_ORDER[0], custom: [], tab: 0, family: '', familyAt: 0, mine: {}, carried: [] };
+  const st = { style: reg.STYLE_ORDER[0], custom: [], tab: 0, family: '', familyAt: 0, mine: {}, carried: [], splits: {} };
   let v = null;
   try { v = typeof text === 'string' ? JSON.parse(text) : text; } catch (e) { v = null; }
   if (!v || typeof v !== 'object' || Array.isArray(v)) return st;
-  const opts = { macros: !!reg.MACROS };
+  const opts = { macros: !!reg.MACROS, menu: !!reg.MOUSE_MENU };
   if (Array.isArray(v.custom)) {
     for (const c of v.custom.slice(0, LIMITS.custom)) {
       const r = validateProfile(c, reg.COMMANDS, reg.STYLES, opts);
@@ -434,12 +541,16 @@ export function readState(text, reg) {
   if (v.mine && typeof v.mine === 'object') for (const f of FAMILIES) if (own(v.mine, f) && valid(v.mine[f])) st.mine[f] = v.mine[f];
   if (Array.isArray(v.carried)) st.carried = v.carried.filter((x) => typeof x === 'string' && /^[\w.:-]{1,60}$/.test(x)).slice(0, 10);
   if (v.collapsed === true) st.collapsed = true;   // 0.6 DF.27: a ribbon style shows its tab names only
+  // 0.7 RIBBON-COMPACT: the face of each split button (the last tool used): { 'id+id+id': 'id' }; used only when the id is still one of the split's
+  if (v.splits && typeof v.splits === 'object' && !Array.isArray(v.splits)) {
+    for (const [k, id] of Object.entries(v.splits).slice(0, 60)) if (/^[\w.:+-]{1,400}$/.test(k) && typeof id === 'string' && /^[\w.:-]{1,60}$/.test(id)) st.splits[k] = id;
+  }
   return st;
 }
 export function writeState(st) {
   return JSON.stringify({ style: st.style, custom: st.custom, tab: st.tab, family: st.family || undefined, familyAt: st.familyAt || undefined,
     mine: Object.keys(st.mine || {}).length ? st.mine : undefined, carried: (st.carried || []).length ? st.carried : undefined,
-    collapsed: st.collapsed ? true : undefined });
+    collapsed: st.collapsed ? true : undefined, splits: Object.keys(st.splits || {}).length ? st.splits : undefined });
 }
 /** Add a person's own profile (id my-<n>; at most LIMITS.custom, the oldest goes). Returns { state, profile }. */
 export function addCustom(st, p) {

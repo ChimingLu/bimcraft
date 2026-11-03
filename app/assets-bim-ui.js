@@ -12,14 +12,17 @@
 import { el } from './ui-util.js';
 import { t } from './i18n.js';
 import { KEY_SPAN } from './ifc-model.js';
-import { FIELDS, readAssets, trackOp, untrackOp, assetDataOp, addEntryOp, editEntryOp, removeEntryOp, assetsCsv } from './assets-bim.js';
+import { cobieSection } from './assets-bim-cobie-ui.js';
+import { SENSORS, sensorSection, readingCell, sensorDetail, paintModel } from './assets-bim-sensors-ui.js';
+import { liveSection } from './assets-bim-live-ui.js';
+import { FIELDS, DOC_KINDS, readAssets, trackOp, untrackOp, assetDataOp, addEntryOp, editEntryOp, removeEntryOp, addDocOp, removeDocOp, openable, assetsCsv } from './assets-bim.js';
 
 const DATE = new Set(['installed', 'warrantyStart', 'warrantyEnd']);
 const slug = (k) => k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());   // warrantyId → warranty-id (keys are lower case)
 
 export function mountAssets(host) {
   if (!host.pane) return null;
-  const S = { q: '', storey: '', dueOnly: false, open: null, editing: null, draft: null, version: 0, read: -1, list: [] };
+  const S = { q: '', storey: '', dueOnly: false, open: null, editing: null, draft: null, doc: null, version: 0, read: -1, list: [] };
   const ed = () => host.editor();
   function assets() {
     if (S.read !== S.version) {
@@ -39,6 +42,22 @@ export function mountAssets(host) {
     render();
     return true;
   };
+  /**
+   * A redraw for readings arriving from a live feed: at most one a second, never while the person is typing in the tab (the
+   * boxes would lose their place); with the tab hidden only the model's colours and labels follow.
+   */
+  let softTimer = null;
+  function soft() {
+    if (softTimer) return;
+    const run = () => {
+      softTimer = null;
+      if (!host.shown()) { const key = SENSORS.show + ':' + SENSORS.store.version + ':' + S.version; if (key !== S.painted) { S.painted = key; paintModel(host, assets()); } return; }
+      const a = typeof document !== 'undefined' ? document.activeElement : null;
+      if (a && host.pane.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { softTimer = setTimeout(run, 1000); return; }
+      render();
+    };
+    softTimer = setTimeout(run, 300);
+  }
   const shortCls = (c) => String(c || '').replace(/^IFC/, '').toLowerCase().replace(/^./, (x) => x.toUpperCase());
   const dueBadge = (a) => (a.due ? el('span', { className: 'as-due as-' + a.due }, t('assets.due.' + a.due)) : null);
   const field = (label, control) => el('label', { className: 'fa-field' }, el('span', {}, label), control);
@@ -59,7 +78,7 @@ export function mountAssets(host) {
     render();
   }
   function csv() {
-    const H = Object.fromEntries(['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes', 'asset', 'entry'].map((k) => [k, t('assets.csv.' + slug(k))]));
+    const H = Object.fromEntries(['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes', 'asset', 'entry', 'document', 'location'].map((k) => [k, t('assets.csv.' + slug(k))]));
     host.download(String(host.fileName() || 'model').replace(/\.ifc$/i, '') + ' assets.csv', assetsCsv(assets(), { storeyName: host.storeyName, head: H }), 'text/csv');
   }
 
@@ -77,6 +96,28 @@ export function mountAssets(host) {
         el('button', { type: 'button', className: 'btn-plot btn-sm-cc', 'data-as-save': '', onclick: () => { const patch = {}; for (const f of FIELDS) if (vals[f] !== a.data[f]) patch[f] = vals[f]; if (Object.keys(patch).length) { try { if (commit(assetDataOp(a.guid, patch), a.name || a.guid)) host.status(t('assets.saved')); } catch (err) { host.status(err.key ? t(err.key) : err.message, true); } } } }, t('assets.btn.save')),
         a.tracked ? el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-as-untrack': '', onclick: () => commit(untrackOp(a.guid), a.name || a.guid) }, t('assets.btn.untrack')) : null));
 
+    // sensor readings and limits (0.7 LC.12 items 3–4)
+    if (SENSORS.store.latest(a.guid) || a.limits.low !== null || a.limits.high !== null || SENSORS.store.guids().length) out.push(...sensorDetail(a, host, { assets, commit, render }));
+    // documents (0.7 LC.12 item 1): manuals, warranties, photos linked by a name or a web address
+    out.push(el('h3', { className: 'bc-h fa-h3' }, t('assets.h.docs')));
+    if (!a.docs.length) out.push(el('p', { className: 'bc-muted' }, t('assets.docs.none')));
+    else out.push(el('ul', { className: 'as-log', 'data-as-docs': '' }, ...a.docs.map((d) => el('li', { 'data-as-doc': d.rel },
+      el('div', { className: 'as-log-head' }, el('span', { className: 'as-due' }, t('assets.doc.' + d.kind)), ' ',
+        openable(d.location) ? el('a', { href: d.location.trim(), target: '_blank', rel: 'noopener noreferrer', 'data-as-doc-open': '' }, d.title || d.location) : el('strong', {}, d.title || d.location)),   // i18n-ignore: a rel value
+      el('div', { className: 'bc-muted as-notes' }, openable(d.location) ? d.location : t('assets.doc.beside', { name: d.location })),
+      d.fromType ? el('div', { className: 'bc-muted' }, t('assets.doc.from-type'))
+        : el('div', { className: 'as-log-acts' }, el('button', { type: 'button', className: 'bc-linkbtn', 'data-as-doc-del': d.rel, onclick: () => commit(removeDocOp(a.guid, d.rel), d.title) }, t('assets.btn.remove')))))));
+    const DD = S.doc && S.doc.guid === a.guid ? S.doc : (S.doc = { guid: a.guid, kind: 'manual', title: '', location: '' });
+    out.push(el('div', { className: 'as-entry-form', 'data-as-doc-form': '' },
+      el('div', { className: 'as-form' },
+        field(t('assets.doc.kind'), el('select', { className: 'select-cc fa-select', 'data-as-d': 'kind', onchange: (e) => { DD.kind = e.target.value; } },
+          ...DOC_KINDS.map((k) => el('option', { value: k, selected: k === DD.kind }, t('assets.doc.' + k))))),
+        field(t('assets.doc.title'), el('input', { type: 'text', className: 'bc-input fa-input', value: DD.title, 'data-as-d': 'title', oninput: (e) => { DD.title = e.target.value; } }))),
+      field(t('assets.doc.location'), el('input', { type: 'text', className: 'bc-input fa-input', value: DD.location, placeholder: t('assets.doc.location.hint'), 'data-as-d': 'location', oninput: (e) => { DD.location = e.target.value; } })),
+      el('div', { className: 'fa-head' }, el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-as-doc-add': '', onclick: () => {
+        try { if (commit(addDocOp(a.guid, DD), DD.title || DD.location)) { S.doc = null; host.status(t('assets.doc.added')); render(); } } catch (err) { host.status(err.key ? t(err.key) : err.message, true); }
+      } }, t('assets.btn.add-doc')))));
+
     // the maintenance record
     out.push(el('h3', { className: 'bc-h fa-h3' }, t('assets.h.log')));
     const blank = { date: host.today(), work: '', by: '', next: '', notes: '' };
@@ -87,7 +128,7 @@ export function mountAssets(host) {
         field(t('assets.e.next'), el('input', { type: 'date', className: 'bc-input fa-input', value: v.next, 'data-as-e': 'next', oninput: (e) => { v.next = e.target.value; } })),
         field(t('assets.e.work'), el('input', { type: 'text', className: 'bc-input fa-input', value: v.work, 'data-as-e': 'work', oninput: (e) => { v.work = e.target.value; } })),
         field(t('assets.e.by'), el('input', { type: 'text', className: 'bc-input fa-input', value: v.by, 'data-as-e': 'by', oninput: (e) => { v.by = e.target.value; } }))),
-      field(t('assets.e.notes'), el('textarea', { className: 'bc-input fa-input', rows: 2, value: v.notes, 'data-as-e': 'notes', oninput: (e) => { v.notes = e.target.value; } })),
+      field(t('assets.e.notes'), el('textarea', { className: 'bc-input fa-input', rows: 2, 'data-as-e': 'notes', oninput: (e) => { v.notes = e.target.value; } }, v.notes)),
       el('div', { className: 'fa-head' }, el('button', { type: 'button', className: 'btn-plot btn-sm-cc', 'data-as-e-ok': '', onclick: onDone }, label),
         S.editing ? el('button', { type: 'button', className: 'btn-line btn-sm-cc', onclick: () => { S.editing = null; render(); } }, t('assets.btn.cancel')) : null));
     if (!a.log.length) out.push(el('p', { className: 'bc-muted' }, t('assets.log.none')));
@@ -124,16 +165,23 @@ export function mountAssets(host) {
     out.push(el('div', { className: 'fa-head' },
       el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-as-track': '', onclick: track, title: t('assets.track.title') }, t('assets.track')),
       el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-as-csv': '', disabled: !all.length, onclick: csv }, t('assets.btn.csv'))));
+    out.push(cobieSection(host, { assets, commit, render }));   // 0.7 LC.12 item 2: COBie out and in
+    out.push(sensorSection(host, { assets, commit, render }));   // 0.7 LC.12 item 3: sensor readings from a CSV
+    out.push(liveSection(host, { assets, commit, render, soft }));   // 0.7 LC.12 item 4: live feeds from the person's own broker
+    const readings = SENSORS.store.guids().length > 0;
     if (!all.length) out.push(el('p', { className: 'bc-muted', 'data-as-empty': '' }, t('assets.none')));
     else out.push(el('div', { className: 'fa-wrap' }, el('table', { className: 'bc-qto-table fa-table', 'data-as-table': '' },
-      el('thead', {}, el('tr', {}, el('th', {}, t('assets.col.name')), el('th', {}, t('assets.col.next')))),
+      el('thead', {}, el('tr', {}, el('th', {}, t('assets.col.name')), el('th', {}, t('assets.col.next')), readings ? el('th', {}, t('assets.col.reading')) : null)),
       el('tbody', {}, ...shown.slice(0, 500).map((a) => el('tr', { className: a.id === S.open ? 'is-on' : '', 'data-as-row': a.guid, tabindex: '0', onclick: () => { S.open = a.id; S.editing = null; host.select([a.id]); render(); }, onkeydown: (e) => { if (e.key === 'Enter') { S.open = a.id; host.select([a.id]); render(); } } },
         el('td', {}, a.name || shortCls(a.cls), a.tag ? el('span', { className: 'bc-muted' }, a.tag) : null, a.due ? el('span', { className: 'as-badge-line' }, dueBadge(a)) : null),
-        el('td', {}, a.nextDue || '')))))));
+        el('td', {}, a.nextDue || ''), readings ? readingCell(a) : null))))));
     if (shown.length > 500) out.push(el('p', { className: 'bc-muted' }, t('assets.more', { n: shown.length - 500 })));
     const open = all.find((a) => a.id === S.open);
     if (open) out.push(el('section', { className: 'as-detail', 'data-as-detail': open.guid }, ...detail(open)));
     host.pane.replaceChildren(...out);
+    // colours and labels on the model follow the readings and the limits (painted again only when either changed)
+    const key = SENSORS.show + ':' + SENSORS.store.version + ':' + S.version;
+    if (key !== S.painted) { S.painted = key; paintModel(host, all); }
   }
   return {
     render, state: S,

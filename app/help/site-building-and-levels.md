@@ -33,6 +33,8 @@ In the {{ui:Levels}} panel, {{ui:Add a level on top}} adds one. {{ui:Add levelsâ
 
 Walls that run to the level above follow it, as do columns and ramps.
 
+{{ui:Copy this levelâ€¦}} (same panel) copies what is drawn on the level you are looking at to another level or to a new level on top, so a floor plan can go up the building in one step. See [Draw walls](topic:draw-walls).
+
 ## Draw on a level
 
 Every {{ui:Draw}} tool works on the level chosen in the plan's level list (or picked in the {{ui:Levels}} panel): what you draw belongs to that level.

@@ -16,11 +16,22 @@ A bundle holds:
 - the layouts as PDF and DWG,
 - a list of what IFC leaves out: the views (each with its storey, layer combination and scale), the layouts and the drawings placed on them, property definitions in their groups, classifications, and standards such as layers, pen sets, line types, fills, surfaces and composites.
 
-Bundles are written by an open-source script that runs inside Archicad and asks Archicad itself for these lists. The script is being tested and is not published yet. BimCraft never reads `.pln` or `.tpl` files directly; see [Open .pln and .pla project files](topic:pln-project-files).
+Bundles are written by an open-source script that runs inside Archicad and asks Archicad itself for these lists. BimCraft never reads `.pln` or `.tpl` files directly; see [Open .pln and .pla project files](topic:pln-project-files).
+
+## Make a bundle
+
+The script is a preview: it has not been tried on every Archicad version yet. Get it from [github.com/getcadcraft/bim-project-bundle](https://github.com/getcadcraft/bim-project-bundle). You need Archicad 24 or later and Python 3.8 or later; nothing else to install.
+
+1. Save `archicad_bundle.py` into a folder, for example `C:\cc-bundle`.
+2. In Archicad, open the project and make a publisher set named exactly **CadCraft bundle**: the 3D view as IFC, every layout as PDF, and every layout again as DWG, published to files on disk in one flat folder.
+3. With the project open, run `python archicad_bundle.py --probe --out .` once. It only reads, and writes `probe.json`.
+4. Run `python archicad_bundle.py --out . --translator "IFC4 Reference View"` (use the IFC translator you picked). Archicad publishes the set and the script writes `<project>.ccbundle.zip`.
+
+If publishing through the script fails, publish the set by hand and run `python archicad_bundle.py --out . --no-publish --files <folder>\*.ifc <folder>\*.pdf <folder>\*.dwg`. The repository's README has every option. If something does not come through, open an issue there and attach `probe.json`.
 
 ## Open a bundle
 
-1. Click {{ui:Choose a file}}, or drop the `.ccbundle.zip` on BimCraft.
+1. Click {{ui:Choose a file}}, or drop the `.ccbundle.zip` on BimCraft. In a folder you opened with {{ui:Open a folder}}, bundles are listed under **Project bundles**; click one by name.
 2. The model opens as any IFC does, and the **Project bundle** section appears on the left, under the file's facts.
 
 Nothing is uploaded: the bundle is read on your computer, one file at a time, so a large model is not copied twice.
@@ -46,6 +57,7 @@ Under **Layouts**, each layout shows its number, name, paper size and the views 
 
 - **PDF** saves the layout's PDF from the bundle.
 - **DWG** opens the layout's drawing in the 2D view. Click any view to come back to the model.
+- **Open in …** sends the layout's file to the app that works on it, in a new tab: the PDF to MarkupCraft, the DWG to CadCraft. It shows only where that app is open next to BimCraft. The file is read from the bundle as the tab loads, and nothing is uploaded.
 
 A layout with neither says **No file in the bundle**.
 

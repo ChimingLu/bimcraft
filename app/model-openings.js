@@ -34,16 +34,27 @@
  */
 import { ids, val, deleteLine } from './ifc-util.js';
 import { round } from './model-write.js';
-import { readWalls, WALL_PSET } from './model-walls.js';
+import { readWalls, WALL_PSET, wallLevelsPassed } from './model-walls.js';
+import { readLevels } from './model-levels.js';
 import { t as tr } from './i18n.js';
 import { DOOR_TYPES, WINDOW_TYPES, openingType, openingTypeName, handKind } from './opening-types.js';
-import { familyFor, familyIndex, sizeTypeFor, evaluateFamily, bodyItems, sizeValues } from './family-model.js';
+import { familyFor, familyIndex, sizeTypeFor, evaluateFamily, bodyItems, sizeValues, evalCtx, readInstance, writeInstance, instanceValues } from './family-model.js';
 import { hostFrame, hostOffset, openingCut, wallGeom } from './model-arcs.js';   // 0.6 round 2 (bim-comforts_PART_2): openings in curved walls
 
 const IN = 25.4;
 export const DOOR_PSET = 'CadCraft_Door';
 export const WINDOW_PSET = 'CadCraft_Window';
 export const OPENING_PSET = 'CadCraft_Opening';
+/**
+ * 0.7 BIM-MLWALL: a door's sill is 0 — except on a wall that runs up through levels, where a door on an upper level stands on that
+ * level's floor: the sill is then that floor's height above the wall's own level. Anything else comes out 0.
+ */
+export function doorSill(w, host, sill) {
+  if (!(sill > 0)) return 0;
+  const levels = readLevels(w), base = levels.find((l) => l.id === host.storey);
+  if (!base) return 0;
+  return wallLevelsPassed(host, levels).some((l) => Math.abs(l.elevation - base.elevation - sill) <= 1) ? sill : 0;
+}
 const PROUD = 10;   // the opening box stands this far out of each wall face, so the cut always goes through
 
 export { DOOR_TYPES, WINDOW_TYPES, openingType, openingTypeName, handKind } from './opening-types.js';
@@ -70,6 +81,7 @@ export function readOpenings(w, storey = null, walls = readWalls(w)) {
         offset: hostOffset(wall, M, Number(ps.Width) * w.unitMm), width: Number(ps.Width) * w.unitMm, height: Number(ps.Height) * w.unitMm, sill: M[14] + wall.baseOffset,
         hand: ps.Hand === 'b' ? 'b' : 'a', face: ps.Face === 'right' ? 'right' : 'left', name: val(line.Name) || '', mark: val(line.Tag) || '',
         family: String(ps.Family || size?.family || ps.TypeKey || ''), typeId, sizeName: size?.name || '', values: size?.values || {},
+        instance: (() => { const f0 = familyFor(w, String(ps.Family || size?.family || '')); return f0 ? readInstance(w, id, f0) : {}; })(),   // 0.7 BIM-FAM-MORE (7): what this element sets itself
       });
     }
   }
@@ -116,14 +128,14 @@ function retype(w, id, typeId) {
   w._famIndex = null;
 }
 
-export function addOpening(w, { wall, typeKey, family = '', values = {}, sizeName = null, offset, width, height, sill, hand = 'a', face = 'left', guid, openingGuid } = {}) {
+export function addOpening(w, { wall, typeKey, family = '', values = {}, instance = {}, sizeName = null, offset, width, height, sill, hand = 'a', face = 'left', guid, openingGuid } = {}) {
   const fam0 = family ? familyFor(w, family) : null;
   if (fam0 && fam0.host === 'wall' && openingType(fam0.base)) typeKey = fam0.base;
   const type = openingType(typeKey);
   if (!type) throw Object.assign(new Error('model.err.opentype'), { key: 'model.err.opentype' });
   const host = readWalls(w).find((x) => x.guid === wall);
   if (!host) throw Object.assign(new Error('model.err.nowall'), { key: 'model.err.nowall' });
-  const W = width > 0 ? width : type.width, H = height > 0 ? height : type.height, S = type.kind === 'door' ? 0 : (Number.isFinite(sill) ? sill : type.sill);
+  const W = width > 0 ? width : type.width, H = height > 0 ? height : type.height, S = type.kind === 'door' ? doorSill(w, host, sill) : (Number.isFinite(sill) ? sill : type.sill);
   const off = fitOffset(host, W, Number.isFinite(offset) ? offset : (host.len - W) / 2);
   if (off === null) throw Object.assign(new Error('model.err.nofit'), { key: 'model.err.nofit' });
   if (S + H > host.height + 1) throw Object.assign(new Error('model.err.tootall'), { key: 'model.err.tootall' });
@@ -150,7 +162,9 @@ export function addOpening(w, { wall, typeKey, family = '', values = {}, sizeNam
   w.relateType(id, sizeTypeFor(w, fam, vals, { name: sizeName }));
   if (w._typeOf) w._typeOf = null;
   const op = { kind: type.kind, typeKey, family: fam.key, values: vals, width: W, height: H, sill: S, hand: hand === 'b' ? 'b' : 'a', face: face === 'right' ? 'right' : 'left', offset: off };
+  op.instance = instanceValues(fam, instance);
   writeOpening(w, { id, opening }, op, host);
+  writeInstance(w, id, fam, op.instance);
   return { id, guid: g, opening: og };
 }
 
@@ -173,7 +187,7 @@ function writeOpening(w, { id, opening }, op, host) {
   w.setShape(opening, [w.rep('body', 'Body', 'SweptSolid', [cut ? w.extrude(w.profile(cut), 0, op.height) : w.box(0, -t / 2 - PROUD, 0, op.width, t / 2 + PROUD, op.height)])]);
   // the family's solids for this size and this wall (a starter kind's recipe is doorParts / windowParts, box for box)
   const fam = openingFamily(w, op.family || op.typeKey, type);
-  const ev = evaluateFamily(fam, { ...(op.values || {}), Width: op.width, Height: op.height }, { wallThickness: t, face: op.face === 'right' ? -1 : 1 });
+  const ev = evaluateFamily(fam, { ...(op.values || {}), ...(op.instance || {}), Width: op.width, Height: op.height }, { wallThickness: t, face: op.face === 'right' ? -1 : 1, ...evalCtx(w) });
   if (!ev.ok) throw Object.assign(new Error(ev.error.key), { key: ev.error.key, fill: ev.error.fill });
   const body = bodyItems(w, ev);
   w.setShape(id, [w.rep('body', 'Body', body.type, body.items)]);
@@ -267,7 +281,7 @@ export function updateOpening(w, guid, ch = {}) {
   const touched = new Set([host.guid]);
   const op = { ...cur };
   for (const k of ['width', 'height', 'sill']) if (Number.isFinite(ch[k]) && ch[k] >= 0) op[k] = ch[k];
-  if (op.kind === 'door') op.sill = 0;
+  if (op.kind === 'door') op.sill = cur.sill;   // a door keeps its floor (0, or an upper level's on a through wall)
   if (ch.typeKey && openingType(ch.typeKey)?.kind === op.kind) { op.typeKey = ch.typeKey; op.family = ch.typeKey; op.values = {}; }
   if (ch.family) {
     const f = familyFor(w, ch.family);
@@ -291,6 +305,7 @@ export function updateOpening(w, guid, ch = {}) {
     if (to.storey !== host.storey) { moveContainment(w, cur.id, to.storey); }
     host = to; touched.add(to.guid);
   }
+  if (op.kind === 'door') op.sill = doorSill(w, host, op.sill);
   const off = fitOffset(host, op.width, Number.isFinite(ch.offset) ? ch.offset : op.offset);
   if (off === null) throw Object.assign(new Error('model.err.nofit'), { key: 'model.err.nofit' });
   if (op.sill + op.height > host.height + 1) throw Object.assign(new Error('model.err.tootall'), { key: 'model.err.tootall' });
@@ -305,7 +320,9 @@ export function updateOpening(w, guid, ch = {}) {
   const tid = sizeTypeFor(w, fam, op.values, { name: ch.sizeName || null });
   if (tid !== cur.typeId) retype(w, cur.id, tid);
   if (fam.key !== cur.family || op.typeKey !== cur.typeKey) { const nm = w.L(fam.name); const l = w.touch(cur.id); l.Name = nm; l.ObjectType = nm; w.write(l); }
+  op.instance = instanceValues(fam, { ...(cur.instance || {}), ...(ch.instance || {}) });
   writeOpening(w, { id: cur.id, opening: cur.openingId }, op, host);
+  writeInstance(w, cur.id, fam, op.instance);
   return { walls: [...touched] };
 }
 function moveContainment(w, id, storey) {

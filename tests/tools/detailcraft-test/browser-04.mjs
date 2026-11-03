@@ -49,6 +49,8 @@
  *   d23 S → Place stair; click A/1 at Level 1 → a stair up to Level 2 (23 risers); click it → Properties "Stair ST1"
  *   d22 the sample's brace: select it, Connect › More › Gusset → 2 gussets, Clashes tab says no clashes
  *   d21 two W16x26 beams end to end: select one, Connect › More › Splice → a splice, Properties "Splice", 36 bolts
+ *   m71 (0.7.1 71.20) a knee of two IPE300: select both, Connect › More › Mitre → the dialog (fields 1–7, the drawing, ticks,
+ *       a bad value turns Add off), Add → one mitre; Properties › the dialog again → Apply; raise the knee, the cut follows; Esc
  *   d20 select the sample's base plate: Stiffeners select → 4, Plate washers → on: 8 new parts, DG1 washer note
  *   d19 issue all, add a hole to a beam: its assembly sheet shows a revision cloud with triangle "B" in the preview
  *   d9  Settings › European steel → a new footing has H16 / H20 bars; Settings › Rebar: BS 8666 codes and soft-metric
@@ -85,7 +87,35 @@ const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, a
 // host.js opens files with the File System Access picker when there is one; headless runs drive the plain
 // <input type=file> instead (Playwright's file chooser), as tools/partcraft-test/browser.mjs does
 await ctx.addInitScript(() => { window.showOpenFilePicker = undefined; });
+// 0.7 WS.13: CC_WORKSPACE=docked|toolbox runs the suite with that workspace layout on (Settings › Global › Layout)
+// (without it: classic, whatever a stored --state remembers)
+await ctx.addInitScript((w) => { try { if (w) localStorage.setItem('cc-workspace', w); else localStorage.removeItem('cc-workspace'); } catch (e) { /* no storage: classic */ } }, process.env.CC_WORKSPACE || '');
 let page = await ctx.newPage();
+// CC_WORKSPACE: after a load, wait until the layout is mounted (it starts once the app has drawn), as a person would see it
+const wsSettled = (p) => { if (!process.env.CC_WORKSPACE) return; for (const m of ['goto', 'reload']) { const f = p[m].bind(p); p[m] = async (...a) => { const r = await f(...a); await p.waitForFunction(() => !document.querySelector('[data-detailcraft]') || document.querySelector('main')?.classList.contains('ws-on') || window.matchMedia('(max-width: 760px)').matches, null, { timeout: 30000 }).catch(() => {}); return r; }; }
+  // the classic controls a layout hides (its view bar, its toolbar): the layout's own buttons click them (the registry), so do the same;
+  // a control in a palette tab not shown (the left panel's own sections sit in the Model tab of the ribbon layout): that tab first
+  const prep = async (sel) => {
+    const h = typeof sel === 'string' ? await p.$(sel).catch(() => null) : null; if (!h) return false;
+    return h.evaluate((e) => {
+      const slot = e.closest('.ws-palette-scroll[hidden]');
+      const name = slot && [...slot.attributes].map((a) => /^data-ws-(.+)-scroll$/.exec(a.name)?.[1]).find(Boolean);
+      if (name) document.querySelector('[data-ws-lower="' + name + '"]')?.click();
+      return !!e.closest('.ws-hide');
+    }).catch(() => false);
+  };
+  const click = p.click.bind(p), choose = p.selectOption.bind(p), fill = p.fill.bind(p), check = p.check.bind(p);
+  p.click = async (sel, o) => (await prep(sel) ? p.$eval(sel, (e) => e.click()) : click(sel, o));
+  p.selectOption = async (sel, v, o) => (await prep(sel) ? p.$eval(sel, (e, x) => { e.value = x; e.dispatchEvent(new Event('change', { bubbles: true })); }, v) : choose(sel, v, o));
+  p.fill = async (sel, v, o) => { await prep(sel); return fill(sel, v, o); };
+  p.check = async (sel, o) => { await prep(sel); return check(sel, o); };
+  // a hidden toolbar button focused and pressed with Enter (the classic keyboard path): the button is clicked, the Enter that follows dropped
+  let clicked = false;
+  const focus = p.focus.bind(p), press = p.keyboard.press.bind(p.keyboard);
+  p.focus = async (sel, o) => { if (await prep(sel)) { clicked = true; return p.$eval(sel, (e) => e.click()); } return focus(sel, o); };
+  p.keyboard.press = async (k, o) => { const skip = clicked && k === 'Enter'; clicked = false; return skip ? undefined : press(k, o); };
+};
+wsSettled(page);
 const problems = [];
 page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()); });
 page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
@@ -96,6 +126,12 @@ const settle = () => page.waitForTimeout(150);
 /** A toolbar action; one in a closed "More" menu opens it first, as a person would. */
 async function act(a) {
   const b = page.locator('.dc-tools [data-act="' + a + '"]').first();
+  // CC_WORKSPACE: a layout that hides the toolbar (the ribbon layout) runs the same command through the menu-style registry, the path
+  // its ribbon takes (bin/test-app-workspaces.mjs checks the ribbon's buttons themselves)
+  if (process.env.CC_WORKSPACE && !(await page.locator('.dc-tools').isVisible())) {
+    await page.evaluate((x) => { const btn = document.querySelector('.dc-tools [data-act="' + x + '"]'); const c = window.ccInput.commands.find((k) => document.querySelector(k.sel) === btn); if (c) window.ccInput.run(c.id); else window.detailcraft.act(x); }, a);
+    return;
+  }
   if (!(await b.isVisible())) await page.locator('.dc-tools details:has([data-act="' + a + '"]) > summary').click();
   await b.click();
 }
@@ -574,6 +610,7 @@ try {
     await dc(() => { const d = window.detailcraft; d.model.change('Rename', (tx) => tx.setName('Autosave check')); });
     await page.waitForTimeout(3500);                     // the copy is written ~2 s after the last edit
     const p2 = await ctx.newPage();
+    wsSettled(p2);
     p2.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
     await page.evaluate(() => { window.onbeforeunload = null; });
     await page.close({ runBeforeUnload: false });
@@ -894,6 +931,92 @@ try {
     ok(/cut list\.csv$/.test(f) && /Bars to buy/.test(txt) && /Cuts \(mark length\)/.test(txt), 'CSV: summary and bars');
     await page.screenshot({ path: path.join(OUT, 'd24-01-cutlist.png') });
     await dc(() => localStorage.removeItem('detailcraft.settings'));
+  }
+
+  if (run('m71')) {
+    console.log('\n0.7.1 71.20 — mitre joint with the dialog');
+    await freshSample('3d');
+    await act('new');
+    await settle();
+    await dc(() => { const d = window.detailcraft; d.model.change('Set up', (tx) => {
+      tx.addMember({ type: 'column', profile: 'IPE300', start: [0, 0, 0], end: [0, 0, 4000], position: 'middle' });
+      tx.addMember({ type: 'beam', profile: 'IPE300', start: [0, 0, 4000], end: [5000, 0, 4000], position: 'middle' });
+    }); });
+    await page.click('[data-act="fit"]');
+    await dc(() => { const d = window.detailcraft; d.setSelection([{ kind: 'member', id: d.model.state.members[0].id }]); });
+    await settle();
+    ok(await dc(() => document.querySelector('.dc-tools [data-act="mitre"]').disabled), 'Mitre is disabled with one member selected');
+    await dc(() => { const d = window.detailcraft; d.setSelection(d.model.state.members.map((m) => ({ kind: 'member', id: m.id }))); });
+    await settle();
+    await act('mitre');
+    await page.waitForSelector('[data-mitre][open]');
+    const look = () => dc(() => {
+      const g = document.querySelector('[data-mitre] .dc-mitre-svg');
+      return { members: g.querySelectorAll('.dc-mi-member').length, plates: g.querySelectorAll('.dc-mi-plate').length, stiff: g.querySelectorAll('.dc-mi-stiffener').length,
+        bolts: g.querySelectorAll('.dc-mi-bolt').length, nums: [...g.querySelectorAll('.dc-mi-num')].map((t) => t.textContent).sort().join(''),
+        rows: [...document.querySelectorAll('[data-mitre] [data-mitre-row]')].map((r) => r.dataset.mitreRow).join(''),
+        lede: document.querySelector('[data-mitre] .dc-mitre-lede').textContent, msgs: document.querySelector('[data-mitre] [data-mitre-msgs]').textContent,
+        apply: !document.querySelector('[data-mitre] [data-mitre-apply]').disabled };
+    });
+    let L = await look();
+    ok(L.rows === '1234567' && L.members === 2 && L.plates === 2 && L.bolts === 8 && L.nums === '12345' && L.stiff === 0, 'the dialog: fields 1–7, our drawing with both members, two end plates, 8 bolts, callouts 1–5', JSON.stringify(L));
+    ok(/meet at 90°; each end is cut 45° from square/.test(L.lede) && /No warnings/.test(L.msgs) && L.apply, 'it says the angle and the cut, no warnings, Add is on', L.lede);
+    await page.check('#dc-mi-stiffs');
+    await settle();
+    L = await look();
+    ok(L.stiff === 4 && L.nums === '1234567', 'ticking the stiffeners draws four and calls out 6 and 7', JSON.stringify(L));
+    await page.fill('#dc-mi-mGap', '-5');
+    await page.keyboard.press('Tab');
+    await settle();
+    ok(!(await look()).apply, 'a negative gap: Add is off');
+    await page.fill('#dc-mi-mGap', '4');
+    await page.keyboard.press('Tab');
+    await page.fill('#dc-mi-extOuter', '70');
+    await page.keyboard.press('Tab');
+    await page.check('#dc-mi-outRow');
+    await settle();
+    L = await look();
+    ok(L.apply && L.bolts === 10, 'gap 4, plates 70 past the outside flange, an outside bolt row: 10 bolts in the drawing', JSON.stringify(L));
+    await page.screenshot({ path: path.join(OUT, 'm71-01-dialog.png') });
+    await page.click('[data-mitre] [data-mitre-apply]');
+    await settle();
+    let st = await dc(() => { const d = window.detailcraft, c = d.model.state.connections[0];
+      return { n: d.model.state.connections.length, type: c?.type, p: c && [c.params.mGap, c.params.extOuter, c.params.outRow, c.params.stiffs].join(), head: document.querySelector('[data-props-h]').textContent,
+        parts: d.built.parts.filter((x) => x.conn === c.id).length, bolts: d.built.bolts.length, open: !!document.querySelector('[data-mitre]'), label: d.model.undoStack.at(-1)?.label }; });
+    ok(st.n === 1 && st.type === 'mitre' && st.p === '4,70,1,1' && st.head === 'Mitre' && st.parts === 6 && st.bolts === 10 && !st.open && st.label === 'Add mitre', 'Add: one mitre with those values, Properties "Mitre", 2 plates + 4 stiffeners, 10 bolts, one undo step', JSON.stringify(st));
+    ok(/1 mitre added/.test(await page.textContent('[data-status]')), 'status: 1 mitre added');
+    await page.screenshot({ path: path.join(OUT, 'm71-02-mitre.png') });
+    await dc(() => window.detailcraft.view.focusPoint([0, 0, 4000], 1400));
+    await settle();
+    await page.screenshot({ path: path.join(OUT, 'm71-03-closeup.png') });
+    // change it through the dialog from Properties
+    await page.click('[data-props] [data-mitre-open]');
+    await page.waitForSelector('[data-mitre][open]');
+    ok(await page.inputValue('#dc-mi-mGap') === '4' && await page.isChecked('#dc-mi-stiffs'), 'the dialog opens on the mitre\'s own values');
+    await page.fill('#dc-mi-tp', '25');
+    await page.keyboard.press('Tab');
+    await page.click('[data-mitre] [data-mitre-apply]');
+    await settle();
+    st = await dc(() => { const d = window.detailcraft, c = d.model.state.connections[0]; return { tp: c.params.tp, plate: d.built.byId.get(c.id + '.pa')?.profileName, label: d.model.undoStack.at(-1)?.label }; });
+    ok(st.tp === 25 && st.plate === 'PL25x150' && st.label === 'Change mitre', 'Apply: plate 25 thick, one undo step "Change mitre"', JSON.stringify(st));
+    // parametric: raise the knee; the cut follows
+    const before = await dc(() => window.detailcraft.built.byId.get(window.detailcraft.model.state.members[0].id).length);
+    await dc(() => { const d = window.detailcraft, [c, b] = d.model.state.members; d.model.change('Raise', (tx) => { tx.updateMember(c.id, { end: [0, 0, 4300] }); tx.updateMember(b.id, { start: [0, 0, 4300], end: [5000, 0, 4300] }); }); });
+    await settle();
+    const after = await dc(() => window.detailcraft.built.byId.get(window.detailcraft.model.state.members[0].id).length);
+    ok(Math.abs(after - before - 300) < 1e-6, 'raising the knee 300: the column\'s mitred length grows 300 (' + before.toFixed(2) + ' → ' + after.toFixed(2) + ')');
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    await settle();
+    ok(await dc(() => window.detailcraft.model.state.connections.length) === 0, 'undo steps back to no mitre');
+    // Escape leaves the model alone
+    await dc(() => { const d = window.detailcraft; d.setSelection(d.model.state.members.map((m) => ({ kind: 'member', id: m.id }))); });
+    await act('mitre');
+    await page.waitForSelector('[data-mitre][open]');
+    await page.keyboard.press('Escape');
+    await settle();
+    ok(await dc(() => !document.querySelector('[data-mitre]') && window.detailcraft.model.state.connections.length === 0), 'Esc closes the dialog and adds nothing');
   }
 
   if (run('x12')) {

@@ -4,7 +4,9 @@
 // The DOM-free work is bundle-open.js and prop-map.js; this file only draws and wires. Every text from the bundle
 // goes through el() (text nodes): a bundle is untrusted.
 import { el, bytes, num } from './ui-util.js';
+import { adoptFromBundle } from './picture-store.js';   // 0.8 D8.8 round 3
 import { t } from './i18n.js';
+import { getDisplayUnits, fmtPaper } from './model-units.js';   // GH.3-A: a layout's size in the display unit
 import { openBundle, layerIndex, viewPlan, viewTree, storeyGuids } from './bundle-open.js';
 import { groupProps } from './prop-map.js';
 
@@ -47,6 +49,7 @@ export function mountBundle(ctx) {
   async function loadModel() {
     let data;
     try { data = await b.index.read(b.manifest.model.file); } catch (e) { throw Object.assign(new Error(bundleError(e, b.file.name)), { userFacing: true }); }
+    try { await adoptFromBundle(b.index); } catch (e) { /* pictures missing: Problems says so */ }   // 0.8 D8.8: the bundle's pictures/ files, before the model reads its references
     await ctx.openModel(data, new File([data], b.manifest.model.file.split('/').pop()));
   }
 
@@ -78,6 +81,16 @@ export function mountBundle(ctx) {
     ctx.status(t('bundle.view.shown', { name: v.name, what: bits.join('; ') || t('bundle.view.whole') }), false, true);
   }
 
+  /** 0.7 BIM-BUNDLE-OPEN: a layout's file to the app that can work on it, in a new tab (handoff.js). */
+  async function layoutHand(l, kind) {
+    const app = ctx.apps?.[kind], path = kind === 'pdf' ? l.pdf : l.dwg;
+    if (!app || !ctx.handoff) return;
+    const name = path.split('/').pop();
+    try {
+      await ctx.handoff(app, async () => new File([await b.index.read(path)], name, { type: kind === 'pdf' ? 'application/pdf' : 'application/acad' }));
+      ctx.status(t('bundle.layout.sent', { file: name, app: app.name }), false, true);
+    } catch (e) { console.error(e); ctx.status(e.code && ERR.includes(e.code) ? bundleError(e, b.file.name) : t(e.code === 'blocked' ? 'handoff.blocked' : 'handoff.failed'), true); }
+  }
   async function layoutFile(l, kind) {
     const path = kind === 'pdf' ? l.pdf : l.dwg;
     let data;
@@ -103,10 +116,12 @@ export function mountBundle(ctx) {
     if (!m.layouts.length) return el('p', { className: 'bc-muted' }, t('bundle.layouts.none'));
     return el('ul', { className: 'bc-bundle-list', 'data-bundle-layouts': '' }, m.layouts.map((l) => el('li', {},
       el('span', { className: 'bc-bundle-lname' }, [l.number, l.name].filter(Boolean).join(' ')),
-      l.size ? el('span', { className: 'bc-muted' }, t('bundle.layout.size', { w: num(l.size.w), h: num(l.size.h) })) : null,
+      l.size ? el('span', { className: 'bc-muted' }, fmtPaper(Number(l.size.w), Number(l.size.h), getDisplayUnits()) || t('bundle.layout.size', { w: num(l.size.w), h: num(l.size.h) })) : null,
       el('span', { className: 'bc-bundle-acts' },
         l.pdf && b.index.has(l.pdf) ? el('button', { type: 'button', className: 'bc-linkbtn', 'data-bundle-pdf': l.id, title: t('bundle.layout.pdf.title'), onClick: () => layoutFile(l, 'pdf') }, t('bundle.layout.pdf')) : null,
         l.dwg && b.index.has(l.dwg) ? el('button', { type: 'button', className: 'bc-linkbtn', 'data-bundle-dwg': l.id, title: t('bundle.layout.dwg.title'), onClick: () => layoutFile(l, 'dwg') }, t('bundle.layout.dwg')) : null,
+        l.pdf && b.index.has(l.pdf) && ctx.apps?.pdf ? el('button', { type: 'button', className: 'bc-linkbtn', 'data-bundle-pdf-hand': l.id, title: t('bundle.layout.hand.title', { app: ctx.apps.pdf.name }), onClick: () => layoutHand(l, 'pdf') }, t('bundle.layout.hand', { app: ctx.apps.pdf.name })) : null,
+        l.dwg && b.index.has(l.dwg) && ctx.apps?.dwg ? el('button', { type: 'button', className: 'bc-linkbtn', 'data-bundle-dwg-hand': l.id, title: t('bundle.layout.hand.title', { app: ctx.apps.dwg.name }), onClick: () => layoutHand(l, 'dwg') }, t('bundle.layout.hand', { app: ctx.apps.dwg.name })) : null,
         !(l.pdf && b.index.has(l.pdf)) && !(l.dwg && b.index.has(l.dwg)) ? el('span', { className: 'bc-muted' }, t('bundle.layout.nofile')) : null),
       l.drawings.length ? el('span', { className: 'bc-muted bc-bundle-drawings' }, t('bundle.layout.drawings', { list: l.drawings.map((d) => d.name).filter(Boolean).join(', ') })) : null)));
   }

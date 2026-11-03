@@ -6,6 +6,10 @@
  *                        (DOOR_TYPES / WINDOW_TYPES keys), or for a starter furniture family (STARTER_FURNITURE keys)
  *   STARTER_KEYS       every starter family key, doors first, then windows, then furniture
  *   STARTER_FURNITURE  the furniture families: a table, a shelf unit, a base cabinet (each with a visibility parameter)
+ *   STARTER_FIXTURES   plumbing fixtures with their connectors: a water closet, a lavatory, a kitchen sink, a shower tray and a
+ *                      laundry tub. Their front is at y = 0 and the wall behind at y = Depth; drains are sized at the smallest
+ *                      fixture drain of NBR 8160 (DN 100 for the water closet), water at DN 20. Each says which fixture it is
+ *                      (`fixture`, mep/fixtures.js), so a drain can be sized by the fixture units it carries.
  *
  * The door and window recipes are model-openings.js `doorParts` / `windowParts` written as solids bound to parameters: the
  * same boxes, in the same order, with the same numbers (constants are written with JavaScript's own digits), so an element
@@ -105,7 +109,7 @@ function windowRecipe(type) {
 }
 
 /** Furniture to start from (each with a Yes / No parameter, so a visibility parameter is there to see). */
-export const STARTER_FURNITURE = ['fam-table', 'fam-shelf', 'fam-cabinet'];
+export const STARTER_FURNITURE = ['fam-table', 'fam-shelf', 'fam-cabinet', 'fam-bed', 'fam-sofa', 'fam-wardrobe', 'fam-chair', 'fam-desk'];   // + bed, sofa, wardrobe, chair, desk: 0.8 EG.60 (furnish.js places them)
 
 function furnitureRecipe(key) {
   /* i18n-ignore-start: the furniture's expressions (code, not words) */
@@ -140,6 +144,66 @@ function furnitureRecipe(key) {
     ],
     booleans: [],
   };
+  // 0.8 EG.60 (bim_PART_2): a bed, a sofa and a wardrobe, for furnish.js. Like the shelf: centred across, the front at y = 0, the back (headboard, sofa back) at y = Depth.
+  if (key === 'fam-bed') return {
+    ifc: { class: 'IfcFurniture', predefined: 'NOTDEFINED' },
+    params: [P('Width', 'length', 1600), P('Depth', 'length', 2000), P('Height', 'length', 520), P('Frame', 'length', 300), P('Headboard', 'length', 1000)],
+    solids: [
+      { id: 's1', name: tr('fam.part.frame'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '100', x1: '(Width / 2)', y1: 'Depth', z1: 'Frame', style: 'wood' },
+      { id: 's2', name: tr('fam.part.mattress'), op: 'box', x0: '(-Width / 2 + 40)', y0: '40', z0: 'Frame', x1: '(Width / 2 - 40)', y1: '(Depth - 80)', z1: 'Height', style: 'frame' },
+      { id: 's3', name: tr('fam.part.headboard'), op: 'box', x0: '(-Width / 2)', y0: '(Depth - 60)', z0: '100', x1: '(Width / 2)', y1: 'Depth', z1: 'Headboard', style: 'wood' },
+      { id: 's4', name: tr('fam.part.leg'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '0', x1: '(-Width / 2 + 60)', y1: '60', z1: '100', style: 'wood' },
+      { id: 's5', name: tr('fam.part.leg'), op: 'box', x0: '(Width / 2 - 60)', y0: '0', z0: '0', x1: '(Width / 2)', y1: '60', z1: '100', style: 'wood' },
+    ],
+    booleans: [],
+  };
+  if (key === 'fam-sofa') return {
+    ifc: { class: 'IfcFurniture', predefined: 'NOTDEFINED' },
+    params: [P('Width', 'length', 2000), P('Depth', 'length', 900), P('Height', 'length', 850), P('Seat', 'length', 430), P('Arm', 'length', 180)],
+    solids: [
+      { id: 's1', name: tr('fam.part.seat'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '80', x1: '(Width / 2)', y1: 'Depth', z1: 'Seat', style: 'leaf' },
+      { id: 's2', name: tr('fam.part.back'), op: 'box', x0: '(-Width / 2)', y0: '(Depth - 220)', z0: 'Seat', x1: '(Width / 2)', y1: 'Depth', z1: 'Height', style: 'leaf' },
+      { id: 's3', name: tr('fam.part.arm'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: 'Seat', x1: '(-Width / 2 + Arm)', y1: '(Depth - 220)', z1: '(Seat + 250)', style: 'leaf' },
+      { id: 's4', name: tr('fam.part.arm'), op: 'box', x0: '(Width / 2 - Arm)', y0: '0', z0: 'Seat', x1: '(Width / 2)', y1: '(Depth - 220)', z1: '(Seat + 250)', style: 'leaf' },
+      { id: 's5', name: tr('fam.part.leg'), op: 'box', x0: '(-Width / 2 + 40)', y0: '40', z0: '0', x1: '(Width / 2 - 40)', y1: '(Depth - 40)', z1: '80', style: 'wood' },
+    ],
+    booleans: [],
+  };
+  if (key === 'fam-wardrobe') return {
+    ifc: { class: 'IfcFurniture', predefined: 'NOTDEFINED' },
+    params: [P('Width', 'length', 1200), P('Depth', 'length', 600), P('Height', 'length', 2100), { key: 'Doors', kind: 'yesno', value: 1 }],
+    solids: [
+      { id: 's1', name: tr('fam.part.carcass'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '0', x1: '(Width / 2)', y1: 'Depth', z1: 'Height', style: 'wood' },
+      { id: 's2', name: tr('fam.part.door'), op: 'box', x0: '(-Width / 2 + 2)', y0: '-18', z0: '0', x1: '-1', y1: '0', z1: 'Height', style: 'leaf', visible: 'Doors' },
+      { id: 's3', name: tr('fam.part.door'), op: 'box', x0: '1', y0: '-18', z0: '0', x1: '(Width / 2 - 2)', y1: '0', z1: 'Height', style: 'leaf', visible: 'Doors' },
+    ],
+    booleans: [],
+  };
+  if (key === 'fam-chair') return {
+    ifc: { class: 'IfcFurniture', predefined: 'CHAIR' },
+    params: [P('Width', 'length', 450), P('Depth', 'length', 500), P('Height', 'length', 880), P('SeatHeight', 'length', 450), P('Leg', 'length', 40)],
+    solids: [
+      { id: 's1', name: tr('fam.part.seat'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '(SeatHeight - 40)', x1: '(Width / 2)', y1: 'Depth', z1: 'SeatHeight', style: 'wood' },
+      { id: 's2', name: tr('fam.part.back'), op: 'box', x0: '(-Width / 2)', y0: '(Depth - 30)', z0: 'SeatHeight', x1: '(Width / 2)', y1: 'Depth', z1: 'Height', style: 'wood' },
+      { id: 's3', name: tr('fam.part.leg'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '0', x1: '(-Width / 2 + Leg)', y1: 'Leg', z1: '(SeatHeight - 40)', style: 'wood' },
+      { id: 's4', name: tr('fam.part.leg'), op: 'box', x0: '(Width / 2 - Leg)', y0: '0', z0: '0', x1: '(Width / 2)', y1: 'Leg', z1: '(SeatHeight - 40)', style: 'wood' },
+      { id: 's5', name: tr('fam.part.leg'), op: 'box', x0: '(-Width / 2)', y0: '(Depth - Leg)', z0: '0', x1: '(-Width / 2 + Leg)', y1: 'Depth', z1: '(SeatHeight - 40)', style: 'wood' },
+      { id: 's6', name: tr('fam.part.leg'), op: 'box', x0: '(Width / 2 - Leg)', y0: '(Depth - Leg)', z0: '0', x1: '(Width / 2)', y1: 'Depth', z1: '(SeatHeight - 40)', style: 'wood' },
+    ],
+    booleans: [],
+  };
+  if (key === 'fam-desk') return {
+    ifc: { class: 'IfcFurniture', predefined: 'DESK' },
+    params: [P('Width', 'length', 1400), P('Depth', 'length', 700), P('Height', 'length', 740), P('Top', 'length', 30), P('Panel', 'length', 25), { key: 'Drawers', kind: 'yesno', value: 1 }],
+    solids: [
+      { id: 's1', name: tr('fam.part.top'), op: 'box', x0: '(-Width / 2)', y0: '0', z0: '(Height - Top)', x1: '(Width / 2)', y1: 'Depth', z1: 'Height', style: 'wood' },
+      { id: 's2', name: tr('fam.part.side'), op: 'box', x0: '(-Width / 2 + 20)', y0: '40', z0: '0', x1: '(-Width / 2 + 20 + Panel)', y1: '(Depth - 20)', z1: '(Height - Top)', style: 'wood' },
+      { id: 's3', name: tr('fam.part.side'), op: 'box', x0: '(Width / 2 - 20 - Panel)', y0: '40', z0: '0', x1: '(Width / 2 - 20)', y1: '(Depth - 20)', z1: '(Height - Top)', style: 'wood' },
+      { id: 's4', name: tr('fam.part.back'), op: 'box', x0: '(-Width / 2 + 20)', y0: '(Depth - 45)', z0: '(Height - Top - 300)', x1: '(Width / 2 - 20)', y1: '(Depth - 20)', z1: '(Height - Top)', style: 'wood' },
+      { id: 's5', name: tr('fam.part.drawers'), op: 'box', x0: '(Width / 2 - 20 - Panel - 400)', y0: '40', z0: '(Height - Top - 600)', x1: '(Width / 2 - 20 - Panel)', y1: '(Depth - 45)', z1: '(Height - Top)', style: 'leaf', visible: 'Drawers' },
+    ],
+    booleans: [],
+  };
   // a base cabinet: a carcass with its front recess cut out by a Boolean, a door, a toe kick cut
   return {
     ifc: { class: 'IfcFurniture', predefined: 'NOTDEFINED' },
@@ -155,7 +219,67 @@ function furnitureRecipe(key) {
   /* i18n-ignore-end */
 }
 
-export const STARTER_KEYS = [...DOOR_TYPES.map((x) => x.key), ...WINDOW_TYPES.map((x) => x.key), ...STARTER_FURNITURE];
+/** Plumbing fixtures to start from, each with its drain and water connectors. */
+export const STARTER_FIXTURES = ['fam-wc', 'fam-lavatory', 'fam-kitchensink', 'fam-shower', 'fam-laundrytub', 'fam-bathtub'];   // + bath tub: 0.8 EG.60
+
+function fixtureRecipe(key) {
+  /* i18n-ignore-start: the fixtures' expressions and connector keys (code, not words) */
+  const box = (id, part, x0, y0, z0, x1, y1, z1, style = 'ceramic') => ({ id, name: tr('fam.part.' + part), op: 'box', x0, y0, z0, x1, y1, z1, style });
+  const conn = (id, system, x, y, z, dir, size, flow) => ({ id, name: tr(system === 'cw' ? 'fam.part.water' : 'fam.part.drain'), domain: 'pipe', system, x, y, z, dir, size, flow });
+  // a bowl or basin: a block with its inside cut out (Rim thick all round, Bowl deep)
+  const basin = (W, D, z0, z1) => [box('s1', 'basin', '(-' + W + ' / 2)', '0', z0, '(' + W + ' / 2)', D, z1),
+    box('s2', 'bowl', '(-' + W + ' / 2 + Rim)', 'Rim', '(' + z1 + ' - Bowl)', '(' + W + ' / 2 - Rim)', '(' + D + ' - Rim)', '(' + z1 + ' + 1)')];
+  if (key === 'fam-wc') return {
+    fixture: 'wc', ifc: { class: 'IfcSanitaryTerminal', predefined: 'TOILETPAN' },
+    params: [P('Width', 'length', 380), P('Depth', 'length', 680), P('Height', 'length', 400), P('TankHeight', 'length', 780), P('Outlet', 'length', 300)],
+    solids: [
+      { id: 's1', name: tr('fam.part.bowl'), op: 'extrude', plane: 'xy', at: '0', profile: [['(-Width / 2)', '(Depth - 200)'], ['(-Width / 2)', '150', 0.4142], ['(Width / 2)', '150'], ['(Width / 2)', '(Depth - 200)']], depth: 'Height', style: 'ceramic' },
+      box('s2', 'tank', '(-Width / 2 - 20)', '(Depth - 200)', '0', '(Width / 2 + 20)', 'Depth', 'TankHeight'),
+    ],
+    booleans: [],
+    connectors: [conn('c1', 'san', '0', '(Depth - Outlet)', '0', '-z', '100', 'out'), conn('c2', 'cw', '(-Width / 2 + 60)', 'Depth', '200', '+y', '20', 'in')],
+  };
+  if (key === 'fam-lavatory') return {
+    fixture: 'lav', ifc: { class: 'IfcSanitaryTerminal', predefined: 'WASHHANDBASIN' },
+    params: [P('Width', 'length', 500), P('Depth', 'length', 450), P('Height', 'length', 850), P('Rim', 'length', 20), P('Bowl', 'length', 150)],
+    solids: [...basin('Width', 'Depth', '(Height - 180)', 'Height'), box('s3', 'pedestal', '-90', '(Depth - 250)', '0', '90', '(Depth - 60)', '(Height - 180)')],
+    booleans: [{ id: 'b1', op: 'difference', a: 's1', b: 's2' }],
+    connectors: [conn('c1', 'san', '0', 'Depth', '500', '+y', '40', 'out'), conn('c2', 'cw', '0', 'Depth', '(Height - 250)', '+y', '20', 'in')],
+  };
+  if (key === 'fam-kitchensink') return {
+    fixture: 'sink', ifc: { class: 'IfcSanitaryTerminal', predefined: 'SINK' },
+    params: [P('Width', 'length', 1200), P('Depth', 'length', 600), P('Height', 'length', 900), P('Rim', 'length', 60), P('Bowl', 'length', 180)],
+    solids: [box('s1', 'cabinet', '(-Width / 2)', '0', '0', '(Width / 2)', 'Depth', '(Height - 30)', 'wood'), box('s2', 'top', '(-Width / 2)', '0', '(Height - 30)', '(Width / 2)', 'Depth', 'Height', 'metal'),
+      box('s3', 'bowl', '-250', 'Rim', '(Height - Bowl)', '250', '(Depth - Rim)', '(Height + 1)', 'metal')],
+    booleans: [{ id: 'b1', op: 'difference', a: 's2', b: 's3' }],
+    connectors: [conn('c1', 'san', '0', 'Depth', '500', '+y', '50', 'out'), conn('c2', 'cw', '100', 'Depth', '600', '+y', '20', 'in')],
+  };
+  if (key === 'fam-shower') return {
+    fixture: 'shower', ifc: { class: 'IfcSanitaryTerminal', predefined: 'SHOWER' },
+    params: [P('Width', 'length', 900), P('Depth', 'length', 900), P('Tray', 'length', 40), P('HeadHeight', 'length', 2100)],
+    solids: [box('s1', 'tray', '(-Width / 2)', '0', '0', '(Width / 2)', 'Depth', 'Tray'), { id: 's2', name: tr('fam.part.head'), op: 'sweep', path: [['0', 'Depth', 'HeadHeight'], ['0', '(Depth - 250)', 'HeadHeight']], radius: '12', style: 'metal' }],
+    booleans: [],
+    connectors: [conn('c1', 'san', '0', '(Depth / 2)', '0', '-z', '40', 'out'), conn('c2', 'cw', '0', 'Depth', 'HeadHeight', '+y', '20', 'in')],
+  };
+  if (key === 'fam-bathtub') return {
+    fixture: 'bath', ifc: { class: 'IfcSanitaryTerminal', predefined: 'BATH' },
+    params: [P('Width', 'length', 1700), P('Depth', 'length', 750), P('Height', 'length', 550), P('Wall', 'length', 40), P('Floor', 'length', 100)],
+    solids: [box('s1', 'tub', '(-Width / 2)', '0', '0', '(Width / 2)', 'Depth', 'Height'),
+      box('s2', 'recess', '(-Width / 2 + Wall)', 'Wall', 'Floor', '(Width / 2 - Wall)', '(Depth - Wall)', '(Height + 1)')],
+    booleans: [{ id: 'b1', op: 'difference', a: 's1', b: 's2' }],
+    connectors: [conn('c1', 'san', '(-Width / 2 + 150)', '(Depth / 2)', '0', '-z', '40', 'out'), conn('c2', 'cw', '(Width / 2 - 150)', 'Depth', '(Height + 100)', '+y', '20', 'in')],
+  };
+  return {
+    fixture: 'laundry', ifc: { class: 'IfcSanitaryTerminal', predefined: 'SINK' },
+    params: [P('Width', 'length', 600), P('Depth', 'length', 550), P('Height', 'length', 850), P('Rim', 'length', 40), P('Bowl', 'length', 300)],
+    solids: [...basin('Width', 'Depth', '0', 'Height')],
+    booleans: [{ id: 'b1', op: 'difference', a: 's1', b: 's2' }],
+    connectors: [conn('c1', 'san', '0', 'Depth', '450', '+y', '40', 'out'), conn('c2', 'cw', '0', 'Depth', '(Height + 200)', '+y', '20', 'in')],
+  };
+  /* i18n-ignore-end */
+}
+
+export const STARTER_KEYS = [...DOOR_TYPES.map((x) => x.key), ...WINDOW_TYPES.map((x) => x.key), ...STARTER_FURNITURE, ...STARTER_FIXTURES];
 
 /** A starter family's recipe; null for an unknown key. Names come from the language files (as the tools show them). */
 export function starterRecipe(key) {
@@ -166,6 +290,10 @@ export function starterRecipe(key) {
       format: 'cadcraft-family', version: 1, key, name: openingTypeName(type), kind: type.kind, host: 'wall', base: key,
       ifc: { class: type.kind === 'door' ? 'IfcDoor' : 'IfcWindow' }, params: r.params, solids: r.solids, booleans: [], starter: true,
     };
+  }
+  if (STARTER_FIXTURES.includes(key)) {
+    const r = fixtureRecipe(key);
+    return { format: 'cadcraft-family', version: 1, key, name: tr('fam.starter.' + key), kind: 'fixture', host: 'none', base: '', ...r, starter: true };
   }
   if (!STARTER_FURNITURE.includes(key)) return null;
   const r = furnitureRecipe(key);

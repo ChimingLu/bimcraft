@@ -12,8 +12,8 @@ Look at a drawing's model space in 3D. Lines and polylines sit at their real hei
 
 ## Steps
 
-1. Open a DWG or DXF. See [View a DWG or DXF drawing](topic:view-dwg).
-2. Click {{ui:3D}} in the bar above the drawing, or press {{key:3}}.
+1. Open a DWG or DXF. See [View a DWG or DXF drawing](topic:view-dwg). It opens in 3D unless {{ui:Settings}} › {{ui:BimCraft}} › **Drawings open in** says {{ui:Model (2D)}}.
+2. From 2D, click {{ui:3D}} in the bar above the drawing, or press {{key:3}}.
 3. Wait a moment the first time: the status line says "Building the drawing in 3D…", then how many lines and faces it shows.
 4. Orbit, pan and zoom (see the table below).
 5. Click a view in the second bar: {{ui:Iso}}, {{ui:Top}}, {{ui:Bottom}}, {{ui:Front}}, {{ui:Back}}, {{ui:Left}} or {{ui:Right}}.

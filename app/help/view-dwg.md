@@ -8,17 +8,18 @@ keywords: dynamic blocks, visibility states, dwg, dxf, cad, drawing, 2d, view, v
 
 ## What you'll do
 
-Open a CAD drawing in 2D, move around it, switch between model space and its sheets, and read coordinates. BimCraft shows DWG and DXF drawings; it does not edit or save them. To change one, click {{ui:Edit in CadCraft}} and the drawing opens in the CadCraft drafting app in a new tab.
+Open a CAD drawing, see it in 3D or 2D, move around it, switch between model space and its sheets, and read coordinates. BimCraft shows DWG and DXF drawings; it does not edit or save them. To change one, click {{ui:Edit in CadCraft}} and the drawing opens in the CadCraft drafting app in a new tab.
 
 ## Steps
 
 1. Click {{ui:Choose a file}}, or drop the drawing onto the page.
 2. Choose a `.dwg` or `.dxf` file.
-3. Wait while the status line says "Reading the drawing…". Large drawings take a few seconds.
-4. Look at the tabs above the drawing: {{ui:Model}} first, then one tab per sheet, in the drawing's own order.
-5. Click a sheet tab to see that sheet: the paper, with the model shown through its viewports.
-6. Click {{ui:Model}} to go back to model space.
-7. Move the pointer over the drawing and read the X and Y coordinates in the corner.
+3. Wait while the status line says "Reading the drawing…". Large drawings take a few seconds. Then it says how long the reading took, "rendering…" while the first picture is drawn, and how long that took.
+4. The drawing opens in 3D, the fastest way to show a large drawing (see [See a DWG or DXF drawing in 3D](topic:dwg-in-3d)). Click {{ui:Model}} for the flat 2D view. To always open drawings in 2D, set {{ui:Settings}} › {{ui:BimCraft}} › **Drawings open in** to {{ui:Model (2D)}}. A drawing with nothing in model space, or a browser that can't show 3D, opens in 2D.
+5. Look at the tabs above the drawing: {{ui:Model}} first, then one tab per sheet, in the drawing's own order.
+6. Click a sheet tab to see that sheet: the paper, with the model shown through its viewports.
+7. Click {{ui:Model}} to go back to model space.
+8. Move the pointer over the drawing and read the X and Y coordinates in the corner.
 
 ## What you should see
 

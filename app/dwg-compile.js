@@ -185,13 +185,18 @@ export function compileDrawing(db, { versionTag = '', xrefs = new Map() } = {}) 
           const content = x ? x.model : (blk.entities || []);
           const sx = e.scale?.x || 1, sy = e.scale?.y || 1;
           const cols = Math.max(1, e.cols || 1), rows = Math.max(1, e.rows || 1);
+          // A tilted extrusion (3D blocks such as insulators on a power line): the insertion point is in the block's own
+          // coordinate system, z included, so it is placed by the full arbitrary-axis rule seen from above. Ignoring the
+          // tilt put Plans.dwg's insulators kilometres from the drawing (2026-10-24).
+          const tilt = planOcs(e.extrusion, e.insert.z || 0);
+          const im = tilt ? mul(ctx.m, tilt) : m;
           for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
               const local = mul(
                 mul(translate(e.insert.x, e.insert.y), rotate(e.rotation || 0)),
                 mul(scale(sx, sy), translate(-base.x + c * (e.colSpacing || 0) / sx, -base.y + r * (e.rowSpacing || 0) / sy)),
               );
-              const sub = subCtx(ctx, mul(m, local), layer, color, lay, lw, x ? { ...x, prefix: e.block + '|' } : null);
+              const sub = subCtx(ctx, mul(im, local), layer, color, lay, lw, x ? { ...x, prefix: e.block + '|' } : null);
               for (const be of content) { if (be.type !== 'ATTDEF') { if (x) stats.xrefEntities++; emit(be, sub); } }
             }
           }
@@ -294,6 +299,7 @@ export function compileDrawing(db, { versionTag = '', xrefs = new Map() } = {}) 
     const s = compileSpace(model.entities || []);
     spaces.push({ key: 'model', name: 'Model', kind: 'model', ...s, viewports: [] });
   }
+  const s0 = spaces[0];   // model space, for the viewports' blank check
   const layouts = (db.layouts || []).filter((l) => !/^model$/i.test(l.name || '')).sort((a, b) => (a.tabOrder ?? 0) - (b.tabOrder ?? 0));
   for (const l of layouts) {
     const rec = recordByHandle.get(l.block);
@@ -306,13 +312,20 @@ export function compileDrawing(db, { versionTag = '', xrefs = new Map() } = {}) 
     // window onto the model — skip it; the rest show the model.
     const vps = s.viewports.slice(1)
       .filter((v) => v.width > 0 && v.height > 0 && v.viewHeight > 0)
-      .map((v) => ({
-        cx: v.center.x, cy: v.center.y, w: v.width, h: v.height,
-        // Model point at the viewport centre: view target + view centre (2D plan views).
-        vx: (v.viewTarget?.x || 0) + (v.viewCenter?.x || 0), vy: (v.viewTarget?.y || 0) + (v.viewCenter?.y || 0),
-        viewHeight: v.viewHeight, twist: v.twist || 0,
-        frozen: new Set(v.frozenLayers || []),
-      }));
+      .map((v) => {
+        // Model point at the viewport centre (2D plan views): view target + view centre, the centre being in display
+        // coordinates — turned by the twist, so it is turned back first (as ezdxf's Viewport.get_transformation_matrix).
+        const tw = v.twist || 0, c = Math.cos(tw), sn = Math.sin(tw), dx = v.viewCenter?.x || 0, dy = v.viewCenter?.y || 0;
+        const vp = {
+          cx: v.center.x, cy: v.center.y, w: v.width, h: v.height,
+          vx: (v.viewTarget?.x || 0) + c * dx + sn * dy, vy: (v.viewTarget?.y || 0) - sn * dx + c * dy,
+          viewHeight: v.viewHeight, twist: tw,
+          frozen: new Set(v.frozenLayers || []),
+        };
+        // Nothing of the model inside the window (e.g. the drawing was moved after the sheet was set up): the view says so.
+        vp.blank = !model || !s0 || !overlaps(s0.bounds, vpWindow(vp));
+        return vp;
+      });
     const empty = !s.batches.size && !vps.length;
     if (empty && !paper) continue;
     if (paper) grow(s.bounds, [paper.minX, paper.minY, paper.maxX, paper.maxY]);
@@ -349,6 +362,22 @@ function mul(p, q) {
 }
 /** Entities drawn with a -Z extrusion are mirrored in X (arbitrary-axis rule, plan views). */
 const ocs = (m, ext) => (ext && ext.z < -0.5 ? mul(m, scale(-1, 1)) : m);
+/**
+ * A tilted extrusion (neither +Z nor -Z) → the object coordinate system seen from above, as an affine: the arbitrary-axis
+ * rule's Ax and Ay projected on XY, and the point's OCS z moved along N. Null for +Z/-Z (`ocs` handles those).
+ */
+function planOcs(ext, z) {
+  if (!ext) return null;
+  const l = Math.hypot(ext.x || 0, ext.y || 0, ext.z || 0);
+  if (l < 1e-12) return null;
+  const N = [(ext.x || 0) / l, (ext.y || 0) / l, (ext.z || 0) / l];
+  if (Math.abs(N[0]) < 1e-9 && Math.abs(N[1]) < 1e-9) return null;
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const unit = (v) => { const k = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / k, v[1] / k, v[2] / k]; };
+  const Ax = unit(Math.abs(N[0]) < 1 / 64 && Math.abs(N[1]) < 1 / 64 ? cross([0, 1, 0], N) : cross([0, 0, 1], N));
+  const Ay = unit(cross(N, Ax));
+  return [Ax[0], Ax[1], Ay[0], Ay[1], N[0] * z, N[1] * z];
+}
 function tx(m, pts) {
   const out = new Float64Array(pts.length);
   for (let i = 0; i < pts.length; i += 2) {
@@ -358,6 +387,15 @@ function tx(m, pts) {
   }
   return out;
 }
+
+/** A viewport's window on the model: the axis-aligned box round its four corners (the model shown, turned or not). */
+function vpWindow(vp) {
+  const hw = vp.w / 2 * vp.viewHeight / vp.h, hh = vp.viewHeight / 2, c = Math.cos(vp.twist), sn = Math.sin(vp.twist);
+  const b = emptyBounds();
+  for (const [x, y] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) grow(b, [vp.vx + c * x + sn * y, vp.vy - sn * x + c * y]);
+  return b;
+}
+const overlaps = (a, b) => a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
 
 export function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
 function grow(b, pts) {
@@ -571,4 +609,4 @@ function hsvHex(h, s, v) {
 }
 
 // Shared with dwg-compile3d.js (the 3D view tessellates the same way; it lifts these 2D points into each entity's plane).
-export { arcPoints, ellipsePoints, bulgePolyline, splinePoints, hatchRings, layerColor, layerPlots, rgbHex, lwOf };
+export { arcPoints, ellipsePoints, bulgePolyline, splinePoints, hatchRings, layerColor, layerPlots, rgbHex, lwOf, planOcs };

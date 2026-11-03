@@ -9,6 +9,9 @@
  *              path as a table and drawn on its work plane in the sketch [data-fe-sketch] (click to add a point, drag a point,
  *              click a segment's middle to add one there, Shift+click it to make it an arc, double-click a point to remove it).
  *   Booleans   [data-fe-tab="booleans"]: cut (difference) or join (union) two solids or Booleans.
+ *   Connectors [data-fe-tab="connectors"] (families placed on a floor): where a pipe or duct joins the element — kind, system,
+ *              x / y / z (numbers or expressions), the way out, size and flow; drawn on the preview as a ring and an arrow;
+ *              and which plumbing fixture the family is [data-fe-fixture] (mep/fixtures.js), for its fixture units.
  *   Preview    the family written as IFC by the same code as the model (family-ifc.js) and drawn by cc-ifc [data-fe-view], with
  *              handles [data-fe-handles]: the size's (Width, Depth, Height) or the picked solid's faces; dragging a handle bound
  *              to a parameter changes the size previewed, a handle on a typed number changes the number.
@@ -16,7 +19,11 @@
  * Editing logic is family-edit.js (no DOM, Node-tested). window.bimcraftFamilyEditor = { state, api } while open (tests).
  */
 import * as FE from './family-edit.js';
-import { readFamily, evaluateFamily, inputParams, sizeValues, arcPoints, STYLES, CONTEXT_NAMES } from './family-model.js';
+import { readFamily, evaluateFamily, inputParams, fullValues, arcPoints, STYLES, CONTEXT_NAMES, PARAM_KINDS, isWordKind, CONNECTOR_DOMAINS, CONNECTOR_DIRS } from './family-model.js';
+import { valueControl, readControl } from './family-values-ui.js';
+import { symbolPanel, partsPanel, hotspotsPanel, solidExtras } from './family-editor-more.js';
+import { PIPE_SYSTEMS, DUCT_SYSTEMS, systemLabel } from './mep-model.js';
+import { FIXTURE_KINDS } from './mep/fixtures.js';
 import { literal, formatNumber } from './expr.js';
 import { Viewer3D } from './viewer3d.js';
 import { toViewer } from './ifc-place.js';
@@ -27,7 +34,8 @@ const STYLE = `
 .bc-fam-ed { width: min(76rem, calc(100vw - 2rem)); max-width: none; max-height: calc(100vh - 2rem); overflow: auto; }
 .bc-fam-ed .bc-fe-top { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; margin-bottom: .4rem; }
 .bc-fam-ed .bc-fe-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .9rem; }
-@media (max-width: 760px) { .bc-fam-ed .bc-fe-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .bc-fam-ed .bc-fe-grid { grid-template-columns: minmax(0, 1fr); } }
+.bc-fam-ed .bc-fe-grid > div { min-width: 0; }
 .bc-fam-ed .bc-fe-tabs { display: flex; gap: .25rem; margin-bottom: .4rem; }
 .bc-fam-ed .bc-fe-tabs [aria-selected="true"] { border-color: var(--ink); font-weight: 600; }
 .bc-fam-ed table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm, .875rem); }
@@ -48,16 +56,22 @@ const STYLE = `
 .bc-fam-ed .bc-fe-baddgo { display: flex; align-items: end; }
 .bc-fam-ed .bc-fe-driven { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .bc-fam-ed h3 { font-size: var(--fs-base, 1rem); margin: .6rem 0 .2rem; }
+.bc-fam-ed [data-fe-panel] { max-width: 100%; overflow-x: auto; }   /* the table of parameters has a column more: it scrolls inside the panel on a phone, never the dialog */
+.bc-fam-ed .bc-fe-tabs { flex-wrap: wrap; }
+.bc-fam-ed textarea.bc-input { width: 100%; }
+.bc-fam-ed > form > .bc-lib-actions { position: sticky; bottom: -1.1rem; z-index: 2; margin: .75rem -1.25rem -1.1rem; padding: .6rem 1.25rem; background: var(--sheet); border-top: var(--pen-1, 1px) solid var(--line); }
+@media (max-width: 760px) { .bc-fam-ed input, .bc-fam-ed select, .bc-fam-ed textarea { font-size: 16px; } }
 `;
 
 const PLANE_AXES = { xy: ['x', 'y'], xz: ['x', 'z'], yz: ['y', 'z'] };
 
-export function openFamilyEditor({ root, t, units, recipe, values, starter = false, scratch, onSave, onClose }) {
+export function openFamilyEditor({ root, t, units, recipe, values, starter = false, scratch, onSave, onClose, materials = [], families = () => [], getFamily = () => null, detail = 'auto' }) {
   if (!document.getElementById('bc-fe-css')) { const st = document.createElement('style'); st.id = 'bc-fe-css'; st.textContent = STYLE; document.head.append(st); }
   const read = readFamily(recipe);
   const E = {
-    fam: read.ok ? read.family : recipe, values: sizeValues(read.ok ? read.family : recipe, values || {}), tab: 'params', sel: (recipe.solids?.[0]?.id) || null,
+    fam: read.ok ? read.family : recipe, values: fullValues(read.ok ? read.family : recipe, values || {}), tab: 'params', sel: (recipe.solids?.[0]?.id) || null,
     handles: 'size', wall: 140, undo: [], redo: [], err: '', seq: 0, pv: null, C: null, sill: 0, drag: null, sk: null, dirty: false,
+    symSel: recipe.symbol?.parts?.[0]?.id || null, partSel: recipe.parts?.[0]?.id || null, hotSel: recipe.hotspots?.[0]?.id || null, detail,
   };
   delete E.fam.starter;
   if (E.fam.kind === 'window') E.sill = 900;   // family-ifc.js previews a window at a 900 mm sill
@@ -92,16 +106,17 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
   const undoB = btn({ 'data-fe-undo': '', title: t('fam.ed.undo') }, '', () => undo(), 'bi-arrow-counterclockwise');
   const redoB = btn({ 'data-fe-redo': '', title: t('fam.ed.redo') }, '', () => redo(), 'bi-arrow-clockwise');
   undoB.setAttribute('aria-label', t('fam.ed.undo')); redoB.setAttribute('aria-label', t('fam.ed.redo'));
-  const tabs = el('div', { className: 'bc-fe-tabs', role: 'tablist' }, ...['params', 'solids', 'booleans'].map((k) => {
+  const tabKeys = ['params', 'solids', 'booleans', ...(E.fam.host === 'wall' ? [] : ['symbol', 'connectors']), 'parts', 'hotspots'];
+  const tabs = el('div', { className: 'bc-fe-tabs', role: 'tablist' }, ...tabKeys.map((k) => {
     const b = el('button', { type: 'button', className: 'btn-line btn-sm-cc', role: 'tab', 'data-fe-tab': k, 'aria-selected': k === E.tab ? 'true' : 'false' }, t('fam.ed.tab.' + k));
-    b.addEventListener('click', () => { E.tab = k; render(); });
+    b.addEventListener('click', () => { E.tab = k; render(); drawHandles(); });
     return b;
   }));
   const panel = el('div', { 'data-fe-panel': '' });
   const view = el('div', { className: 'bc-fe-view', 'data-fe-view': '' });
   const c3 = el('canvas', { 'data-fe-3d': '' }), ch = el('canvas', { 'data-fe-handles': '' });
   view.append(c3, ch);
-  const handleSel = select({ 'data-fe-handlemode': '', 'aria-label': t('fam.ed.handles') }, [['size', t('fam.ed.handles.size')], ['solid', t('fam.ed.handles.solid')], ['off', t('fam.ed.handles.off')]], E.handles, (v) => { E.handles = v; drawHandles(); });
+  const handleSel = select({ 'data-fe-handlemode': '', 'aria-label': t('fam.ed.handles') }, [['size', t('fam.ed.handles.size')], ['solid', t('fam.ed.handles.solid')], ['hotspots', t('fam.ed.handles.hotspots')], ['off', t('fam.ed.handles.off')]], E.handles, (v) => { E.handles = v; drawHandles(); });
   const pvBox = el('div', { 'data-fe-preview': '' });
   const sketchBox = el('div', { 'data-fe-sketchbox': '', hidden: true });
   const sketch = el('div', { className: 'bc-fe-sketch', 'data-fe-sketch': '' });
@@ -138,7 +153,7 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
     onClose?.();
   });
   dlg.showModal();
-  const say = (text) => { E.err = text || ''; errEl.textContent = E.err; };
+  const say = (text) => { E.err = text || ''; errEl.textContent = E.err; if (E.err) errEl.scrollIntoView?.({ block: 'nearest' }); };   // the message is always where you can read it
 
   // ---------------------------------------------------------------------------------------------- changes and undo
   /** Take an editing result: the new recipe (one editor undo step), or its refusal shown and nothing changed. */
@@ -149,7 +164,7 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
     E.redo = [];
     E.fam = r.fam;
     if (values) E.values = values;
-    E.values = sizeValues(E.fam, E.values);
+    E.values = fullValues(E.fam, E.values);
     E.dirty = true;
     say('');
     if (!keepPanel) render();
@@ -169,44 +184,54 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
 
   // ---------------------------------------------------------------------------------------------- the left panel
   /** Re-render, keeping focus on the same control (found again by its data-fe-* attributes). */
+  let rendering = false, renderAgain = false;
   function render() {
+    // moving the focus inside a render fires the blur / change of another box, which asks for a render: it waits for this one
+    if (rendering) { renderAgain = true; return; }
+    rendering = true;
+    try { renderNow(); } finally { rendering = false; }
+    if (renderAgain) { renderAgain = false; render(); }
+  }
+  function renderNow() {
     const a = document.activeElement, key = a && dlg.contains(a) ? [...a.attributes].filter((x) => x.name.startsWith('data-fe-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('') : '';
     nameIn.value = E.fam.name;
     undoB.disabled = !E.undo.length; redoB.disabled = !E.redo.length;
     for (const b of tabs.children) b.setAttribute('aria-selected', b.dataset.feTab === E.tab ? 'true' : 'false');
-    panel.replaceChildren(...(E.tab === 'params' ? paramsPanel() : E.tab === 'solids' ? solidsPanel() : boolPanel()));
+    panel.replaceChildren(...(E.tab === 'params' ? paramsPanel() : E.tab === 'solids' ? solidsPanel() : E.tab === 'symbol' ? symbolPanel(more()) : E.tab === 'parts' ? partsPanel(more()) : E.tab === 'hotspots' ? hotspotsPanel(more()) : E.tab === 'connectors' ? connPanel() : boolPanel()));
     pvBox.replaceChildren(...previewInputs());
     drawSketchBox();
     if (key) { const n = dlg.querySelector(key); if (n && n !== a) n.focus(); }
   }
-  const ev = () => evaluateFamily(E.fam, E.values, { wallThickness: E.wall });
+  /** What the newer panels (family-editor-more.js) take from this editor. */
+  const more = () => ({ E, t, FE, el, input, select, btn, change, L, units, render, families: families(), materials });
+  /** What evaluating needs: the wall, the project's detail level and the other families this one may hold. */
+  const evalCtx2 = () => ({ wallThickness: E.wall, detail: E.detail, resolve: (k) => getFamily(k) });
+  const ev = () => evaluateFamily(E.fam, E.values, evalCtx2());
 
   function paramsPanel() {
     const r = ev(), driven = r.ok ? r.values : {};
-    const kinds = ['length', 'angle', 'number', 'yesno'].map((k) => [k, t('fam.ed.kind.' + k)]);
+    const kinds = PARAM_KINDS.map((k) => [k, t('fam.ed.kind.' + k)]);
     const rows = E.fam.params.map((p, i) => {
-      const valIn = p.kind === 'yesno'
-        ? (() => { const c = el('input', { type: 'checkbox', 'data-fe-pval': p.key, 'aria-label': t('fam.ed.default') }); c.checked = !!p.value; c.addEventListener('change', () => change(FE.setParam(E.fam, p.key, { value: c.checked ? 1 : 0 }))); return c; })()
-        : input({ 'data-fe-pval': p.key, 'aria-label': t('fam.ed.default') }, p.kind === 'length' ? L(p.value) : String(p.value), (v, i2) => {
-          const n = p.kind === 'length' ? parseLen(v, units()) : Number(String(v).replace(',', '.'));
-          if (!Number.isFinite(n)) { i2.value = p.kind === 'length' ? L(p.value) : String(p.value); say(t('model.err.length')); return; }
-          change(FE.setParam(E.fam, p.key, { value: n }));
-        }, 7);
+      const valIn = valueControl({ p, value: p.value, L, units, parseLen, t, materials, attrs: { 'data-fe-pval': p.key, 'aria-label': t('fam.ed.default') }, onChange: (v) => {
+        if (v === null) { say(t('model.err.length')); return; }
+        change(FE.setParam(E.fam, p.key, { value: v }));
+      } });
       if (p.formula) valIn.disabled = true;
       const shown = p.formula && Number.isFinite(driven[p.key]) ? (p.kind === 'length' ? L(driven[p.key]) : p.kind === 'yesno' ? t(driven[p.key] ? 'fam.yes' : 'fam.no') : formatNumber(driven[p.key])) : '';
       return el('tr', { 'data-fe-param': p.key },
         el('td', {}, input({ 'data-fe-pkey': String(i), 'aria-label': t('fam.ed.pname') }, p.key, (v, i2) => { const ok = change(FE.renameParam(E.fam, p.key, v.trim())); if (!ok) i2.value = p.key; }, 9)),
         el('td', {}, select({ 'data-fe-pkind': p.key, 'aria-label': t('fam.ed.pkind') }, kinds, p.kind, (v) => change(FE.setParam(E.fam, p.key, { kind: v })))),
         el('td', {}, valIn),
-        el('td', {}, input({ 'data-fe-pformula': p.key, 'aria-label': t('fam.ed.formula'), placeholder: t('fam.ed.formula.none') }, p.formula || '', (v) => change(FE.setParam(E.fam, p.key, { formula: v })), 12), shown ? el('span', { className: 'bc-fe-driven', 'data-fe-pdriven': p.key }, ' = ' + shown) : null),   // i18n-ignore: an equals sign
+        el('td', {}, isWordKind(p.kind) ? el('span', { className: 'bc-muted' }, '') : input({ 'data-fe-pformula': p.key, 'aria-label': t('fam.ed.formula'), placeholder: t('fam.ed.formula.none') }, p.formula || '', (v) => change(FE.setParam(E.fam, p.key, { formula: v })), 12), shown ? el('span', { className: 'bc-fe-driven', 'data-fe-pdriven': p.key }, ' = ' + shown) : null),   // i18n-ignore: an equals sign
+        el('td', {}, (() => { const cb = el('input', { type: 'checkbox', 'data-fe-pinst': p.key, title: t('fam.ed.instance.title'), 'aria-label': t('fam.ed.instance') }); cb.checked = !!p.instance; cb.disabled = !!p.formula; cb.addEventListener('change', () => change(FE.setParam(E.fam, p.key, { instance: cb.checked }))); return cb; })()),
         el('td', {}, btn({ 'data-fe-prm': p.key, title: t('fam.ed.premove'), 'aria-label': t('fam.ed.premove') }, '', () => change(FE.removeParam(E.fam, p.key)), 'bi-x-lg')));
     });
     const newKind = select({ 'data-fe-paddkind': '', 'aria-label': t('fam.ed.pkind') }, kinds, 'length', () => {});
     return [
-      el('table', { 'data-fe-params': '' }, el('thead', {}, el('tr', {}, el('th', {}, t('fam.ed.pname')), el('th', {}, t('fam.ed.pkind')), el('th', {}, t('fam.ed.default')), el('th', {}, t('fam.ed.formula')), el('th', {}, ''))), el('tbody', {}, ...rows)),
+      el('table', { 'data-fe-params': '' }, el('thead', {}, el('tr', {}, el('th', {}, t('fam.ed.pname')), el('th', {}, t('fam.ed.pkind')), el('th', {}, t('fam.ed.default')), el('th', {}, t('fam.ed.formula')), el('th', {}, t('fam.ed.instance')), el('th', {}, ''))), el('tbody', {}, ...rows)),
       el('p', { className: 'bc-fe-row' }, newKind, btn({ 'data-fe-padd': '' }, t('fam.ed.padd'), () => {
-        const k = newKind.value, key = FE.freeParamKey(E.fam, k === 'yesno' ? 'Show' : 'P');
-        change(FE.addParam(E.fam, { key, kind: k, value: k === 'length' ? 100 : k === 'yesno' ? 1 : 0 }));
+        const k = newKind.value, key = FE.freeParamKey(E.fam, k === 'yesno' ? 'Show' : k === 'text' ? 'Text' : k === 'material' ? 'Material' : k === 'fill' ? 'Fill' : k === 'integer' ? 'Count' : k === 'pen' ? 'Pen' : 'P');
+        change(FE.addParam(E.fam, { key, kind: k, value: k === 'length' ? 100 : k === 'yesno' ? 1 : k === 'pen' ? 3 : k === 'integer' ? 2 : isWordKind(k) ? (k === 'fill' ? 'none' : '') : 0 }));
       }, 'bi-plus-lg')),
       el('p', { className: 'bc-muted' }, t(E.fam.host === 'wall' ? 'fam.ed.pnote.hosted' : 'fam.ed.pnote', { names: CONTEXT_NAMES.join(', ') })),
     ];
@@ -239,6 +264,7 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
         el('label', {}, el('span', {}, t('fam.name')), input({ 'data-fe-sname': '' }, s.name || '', (v) => set({ name: v }), 10)),
         el('label', {}, el('span', {}, t('fam.ed.colour')), select({ 'data-fe-sstyle': '' }, Object.keys(STYLES).map((k) => [k, t(STYLES[k].name)]), s.style, (v) => set({ style: v }))),
         el('label', {}, el('span', {}, t('fam.ed.shown')), visIn))];
+    out.push(...solidExtras(more(), s));
     const field = (k, label = k) => el('label', {}, el('span', {}, label), input({ 'data-fe-f': k }, s[k], (v, i) => { if (!set({ [k]: v })) i.value = s[k]; }, 9));
     const f = el('div', { className: 'bc-fe-fields', 'data-fe-fields': '' });
     if (s.op === 'box') for (const k of ['x0', 'x1', 'y0', 'y1', 'z0', 'z1']) f.append(field(k));
@@ -295,22 +321,48 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
     ];
   }
 
+  // ---------------------------------------------------------------------------------------------- connectors
+  const DIR_KEYS = { '+x': 'px', '-x': 'nx', '+y': 'py', '-y': 'ny', '+z': 'pz', '-z': 'nz' };
+  const sysOpts = (domain) => Object.keys(domain === 'duct' ? DUCT_SYSTEMS : PIPE_SYSTEMS).map((k) => [k, systemLabel(domain, k)]);
+  function connPanel() {
+    const list = (E.fam.connectors || []).map((c) => {
+      const set = (patch) => change(FE.setConnector(E.fam, c.id, patch));
+      const field = (k, label) => el('label', {}, el('span', {}, label), input({ 'data-fe-cf': c.id + ':' + k }, c[k], (v, i) => { if (!set({ [k]: v })) i.value = c[k]; }, 7));
+      return el('div', { 'data-fe-conn': c.id },
+        el('h3', {}, t('fam.ed.conn', { name: c.name || c.id })),
+        el('div', { className: 'bc-fe-fields' },
+          el('label', {}, el('span', {}, t('fam.name')), input({ 'data-fe-cname': c.id }, c.name || '', (v) => set({ name: v }), 10)),
+          el('label', {}, el('span', {}, t('fam.ed.cdomain')), select({ 'data-fe-cdomain': c.id }, CONNECTOR_DOMAINS.map((d) => [d, t('mep.part.' + d)]), c.domain,
+            (v) => set({ domain: v, system: Object.keys(v === 'duct' ? DUCT_SYSTEMS : PIPE_SYSTEMS)[0] }))),
+          el('label', {}, el('span', {}, t('fam.ed.csystem')), select({ 'data-fe-csystem': c.id }, sysOpts(c.domain), c.system, (v) => set({ system: v }))),
+          field('x', 'x'), field('y', 'y'), field('z', 'z'),   // i18n-ignore: axis names
+          el('label', {}, el('span', {}, t('fam.ed.cdir')), select({ 'data-fe-cdir': c.id }, Object.keys(CONNECTOR_DIRS).map((d) => [d, t('fam.ed.cdir.' + DIR_KEYS[d])]), c.dir, (v) => set({ dir: v }))),
+          field('size', t('fam.ed.csize')),
+          el('label', {}, el('span', {}, t('fam.ed.cflow')), select({ 'data-fe-cflow': c.id }, [['in', t('fam.ed.cflow.in')], ['out', t('fam.ed.cflow.out')]], c.flow, (v) => set({ flow: v })))),
+        el('p', { className: 'bc-fe-row' }, btn({ 'data-fe-crm': c.id }, t('fam.ed.cremove'), () => change(FE.removeConnector(E.fam, c.id)), 'bi-trash')));
+    });
+    const kind = select({ 'data-fe-caddkind': '', 'aria-label': t('fam.ed.cdomain') }, CONNECTOR_DOMAINS.map((d) => [d, t('mep.part.' + d)]), 'pipe', () => {});
+    const fixture = select({ 'data-fe-fixture': '' }, [['', t('fam.fixture.none')], ...FIXTURE_KINDS.map((k) => [k, t('fam.fixture.' + k)])], E.fam.fixture || '', (v) => change(FE.setFixture(E.fam, v)));
+    return [
+      el('p', { className: 'bc-muted' }, t('fam.ed.cnote')),
+      el('div', { className: 'bc-fe-fields' }, el('label', {}, el('span', {}, t('fam.ed.fixture')), fixture)),
+      el('p', { className: 'bc-muted' }, t('fam.ed.fixture.note')),
+      ...(list.length ? list : [el('p', { className: 'bc-muted' }, t('fam.ed.cnone'))]),
+      el('div', { className: 'bc-fe-fields bc-fe-badd' }, el('label', {}, el('span', {}, t('fam.ed.cdomain')), kind),
+        el('span', { className: 'bc-fe-baddgo' }, btn({ 'data-fe-cadd': '' }, t('fam.ed.cadd'), () => change(FE.addConnector(E.fam, { domain: kind.value })), 'bi-plus-lg'))),
+    ];
+  }
+
   // ---------------------------------------------------------------------------------------------- the size previewed
   function previewInputs() {
     const box = el('div', { className: 'bc-fe-fields' });
     for (const p of inputParams(E.fam)) {
       const v = E.values[p.key];
-      if (p.kind === 'yesno') {
-        const c = el('input', { type: 'checkbox', 'data-fe-pv': p.key }); c.checked = !!v;
-        c.addEventListener('change', () => { E.values = { ...E.values, [p.key]: c.checked ? 1 : 0 }; schedule(); render(); });
-        box.append(el('label', {}, el('span', {}, p.label || p.key), c));
-        continue;
-      }
-      box.append(el('label', {}, el('span', {}, (p.label || p.key) + (p.kind === 'angle' ? ' (°)' : '')), input({ 'data-fe-pv': p.key }, p.kind === 'length' ? L(v) : String(v), (s, i) => {   // i18n-ignore: a degree sign
-        const n = p.kind === 'length' ? parseLen(s, units()) : Number(String(s).replace(',', '.'));
-        if (!Number.isFinite(n)) { i.value = p.kind === 'length' ? L(v) : String(v); say(t('model.err.length')); return; }
+      const ctl = valueControl({ p, value: v, L, units, parseLen, t, materials, attrs: { 'data-fe-pv': p.key }, onChange: (n) => {
+        if (n === null) { say(t('model.err.length')); return; }
         E.values = { ...E.values, [p.key]: n }; say(''); schedule(); render();
-      }, 7)));
+      } });
+      box.append(el('label', {}, el('span', {}, (p.label || p.key) + (p.kind === 'angle' ? ' (°)' : '') + (p.instance ? ' ·' : '')), ctl));   // i18n-ignore: a degree sign; a dot marks a per-element parameter
     }
     if (E.fam.host === 'wall') box.append(el('label', {}, el('span', {}, t('fam.ed.wall')), input({ 'data-fe-pvwall': '' }, L(E.wall), (s, i) => {
       const n = parseLen(s, units());
@@ -320,6 +372,13 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
     return [el('h3', {}, t('fam.ed.previewsize')), box];
   }
 
+  /** The families this one holds (and those they hold), as recipes: the preview's scratch file needs them. */
+  function depsOf(fam) {
+    const out = [], seen = new Set([fam.key]);
+    const walk = (f) => { for (const p of f.parts || []) { if (seen.has(p.family)) continue; seen.add(p.family); const c = getFamily(p.family); if (c) { walk(c); out.push(c); } } };
+    walk(fam);
+    return out;
+  }
   // ---------------------------------------------------------------------------------------------- the preview (cc-ifc)
   let v = null;
   try { v = new Viewer3D(c3, {}); v.onRender = () => drawHandles(); } catch (e) { console.error(e); view.replaceChildren(el('p', { className: 'bc-muted' }, t('fam.ed.nopreview'))); }
@@ -335,7 +394,7 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
     if (!e0.ok) { say(msg(e0.error)); return; }
     if (stateEl()) stateEl().textContent = t('fam.ed.drawing');
     const s = await scratch();
-    const r = await s.preview(E.fam, E.values, { wallThickness: E.wall });
+    const r = await s.preview(E.fam, E.values, { wallThickness: E.wall, deps: depsOf(E.fam), detail: E.detail });
     if (seq !== E.seq) return;
     if (r.error) { say(msg(r.error)); if (stateEl()) stateEl().textContent = ''; return; }
     const first = !E.pv;
@@ -356,9 +415,10 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
   }
 
   // ---------------------------------------------------------------------------------------------- handles in the 3D view
-  const ctxOf = () => ({ wallThickness: E.wall });
+  const ctxOf = () => evalCtx2();
   function handleList() {
     if (!E.C || E.handles === 'off') return [];
+    if (E.handles === 'hotspots') return FE.hotspotHandles(E.fam, E.values, ctxOf());
     return E.handles === 'size' ? FE.sizeHandles(E.fam, E.values, ctxOf()) : E.sel ? FE.solidHandles(E.fam, E.values, E.sel, ctxOf()) : [];
   }
   /** A family point (mm, z up) → the preview's viewer space (the family stands at the origin; a window at its sill). */
@@ -379,6 +439,19 @@ export function openFamilyEditor({ root, t, units, recipe, values, starter = fal
       E.hs.push({ h, x, y });
       g.beginPath(); g.arc(x, y, 6, 0, Math.PI * 2); g.fillStyle = action; g.fill(); g.lineWidth = 1.5; g.strokeStyle = sheet; g.stroke();
       g.font = '12px system-ui, sans-serif'; g.fillStyle = ink; g.fillText(h.label, x + 9, y - 7);
+    }
+    // the connectors: a ring at each, an arrow the way out (on the Connectors tab)
+    if (E.tab !== 'connectors') return;
+    const e0 = ev();
+    for (const c of e0.ok ? e0.connectors : []) {
+      const a = v.project(toV(c.p)), b = v.project(toV(c.p.map((q, i) => q + c.dir[i] * Math.max(120, c.size * 2))));
+      if (!a || !b) continue;
+      const ax = a.x - r.left, ay = a.y - r.top, bx = b.x - r.left, by = b.y - r.top;
+      g.strokeStyle = action; g.lineWidth = 2;
+      g.beginPath(); g.arc(ax, ay, 7, 0, Math.PI * 2); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke();
+      const ang = Math.atan2(by - ay, bx - ax);
+      g.beginPath(); g.moveTo(bx, by); g.lineTo(bx - 8 * Math.cos(ang - 0.4), by - 8 * Math.sin(ang - 0.4)); g.moveTo(bx, by); g.lineTo(bx - 8 * Math.cos(ang + 0.4), by - 8 * Math.sin(ang + 0.4)); g.stroke();
+      g.font = '12px system-ui, sans-serif'; g.fillStyle = ink; g.fillText(c.name || c.id, ax + 10, ay + 14);
     }
   }
   // a press on a handle drags it (OrbitControls never sees it); anything else orbits the preview as usual

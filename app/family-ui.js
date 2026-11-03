@@ -15,8 +15,13 @@
  * The model side: family-model.js / family-ops.js. Test hook: window.bimcraftFamilies = { state, api }.
  */
 import { readFamilies, readFamilyElements, unhostedFamilies, newSize, renameSize, removeSizes, duplicateFamily, newFamily, importFamilies, removeFamily,
-  placeFamily, setFamilySize, moveFamilyElement, removeFamilyElements, familyFile, familyWriter, saveFamily } from './family-ops.js';
-import { familyFor, evaluateFamily, inputParams, sizeValues, planBounds, newFamilyKey } from './family-model.js';
+  placeFamily, setFamilySize, familyLibrary, readFamilyLibrary, moveFamilyElement, removeFamilyElements, familyFile, familyWriter, saveFamily, importSizes, sizesCsv, setFamilyDetail, setFamilyInstance, resizeFamilyElements } from './family-ops.js';
+import { familyFor, evaluateFamily, inputParams, sizeParams, instanceParams, fullValues, DETAIL_CHOICES, isWordKind, sizeValues, planBounds, newFamilyKey, familyDetail, detailForScale, evalCtx } from './family-model.js';
+import { dragHotspot } from './family-edit.js';
+import { valueControl, readControl } from './family-values-ui.js';
+import { readMaterials } from './project-materials.js';
+import { symbolScene } from './family-symbol.js';
+import { hatchSegments } from './drafting.js';
 import { STARTER_KEYS, starterRecipe } from './family-starters.js';
 import { DOOR_TYPES, WINDOW_TYPES, openingTypeName } from './opening-types.js';
 import { familyScratch } from './family-ifc.js';
@@ -51,16 +56,22 @@ export function mountFamilies(modelUi) {
     const w = W();
     if (!w) { R.fams = []; R.elements = []; return; }
     try { R.fams = readFamilies(w); R.elements = readFamilyElements(w); } catch (e) { console.error(e); R.fams = []; R.elements = []; }
+    R.detail = familyDetail(w);
+    R.symbols = new Map();
+    for (const e of R.elements) if (!R.symbols.has(e.family)) { const fam = familyFor(w, e.family); R.symbols.set(e.family, fam?.symbol?.parts?.length && fam.symbol.mode !== 'cut' ? fam : null); }
   }
+  /** The plan symbol of a placed element's family: its recipe when it has a symbol the plan draws, else null. */
+  const symbolFamily = (e) => R.symbols?.get(e.family) || null;
   const famOf = (key) => R.fams.find((f) => f.key === key) || null;
-  const recipeOf = (key) => familyFor(W(), key) || starterRecipe(key);
+  const recipeOf = (key) => { try { return familyFor(W(), key) || starterRecipe(key); } catch (e) { return starterRecipe(key); } };   // (the model is being rebuilt: only a starter can be named)
   /** A size's values as people read them: lengths in their units, Yes / No, numbers. */
   function valuesText(fam, values) {
     if (!fam) return '';
     const v = sizeValues(fam, values);
-    return inputParams(fam).map((p) => (p.label || p.key) + ' ' + (p.kind === 'length' ? L(v[p.key]) : p.kind === 'yesno' ? t(v[p.key] ? 'fam.yes' : 'fam.no') : p.kind === 'angle' ? v[p.key] + '°' : String(v[p.key]))).join(', ');
+    const mats = new Map(materialList());
+    return sizeParams(fam).map((p) => (p.label || p.key) + ' ' + (p.kind === 'length' ? L(v[p.key]) : p.kind === 'yesno' ? t(v[p.key] ? 'fam.yes' : 'fam.no') : p.kind === 'angle' ? v[p.key] + '°' : p.kind === 'material' ? (mats.get(v[p.key]) || v[p.key] || t('fam.val.nomaterial')) : p.kind === 'fill' ? t('fam.fill.' + v[p.key]) : String(v[p.key]))).join(', ');   // i18n-ignore: a degree sign
   }
-  const sizeName = (fam, v) => (['Width', 'Height'].every((k) => k in v) ? L(v.Width) + ' × ' + L(v.Height) : inputParams(fam).filter((p) => p.kind === 'length').slice(0, 3).map((p) => L(v[p.key])).join(' × ') || fam.name);
+  const sizeName = (fam, v) => (['Width', 'Height'].every((k) => k in v) ? L(v.Width) + ' × ' + L(v.Height) : sizeParams(fam).filter((p) => p.kind === 'length').slice(0, 3).map((p) => L(v[p.key])).join(' × ') || fam.name);
   async function scratch() { if (!R.scratch) R.scratch = await familyScratch(A.ed().W, IfcModel); return R.scratch; }
   /** A refusal in words (a reason that is itself a key, as fam.err.atsize carries, is put in words too). */
   function msgOf(e) {
@@ -115,23 +126,21 @@ export function mountFamilies(modelUi) {
   function paramInputs(fam, values, attr) {
     const v = sizeValues(fam, values), ins = [];
     const box = el('div', { className: 'bc-fam-grid' });
-    for (const p of inputParams(fam)) {
-      let i;
-      if (p.kind === 'yesno') { i = el('input', { type: 'checkbox', [attr]: p.key }); i.checked = !!v[p.key]; box.append(el('label', { className: 'bc-fam-yn' }, i, p.label || p.key)); }
-      else { i = el('input', { type: 'text', className: 'bc-input bc-num', [attr]: p.key, value: p.kind === 'length' ? L(v[p.key]) : String(v[p.key]), size: 9 }); box.append(el('label', {}, el('span', {}, (p.label || p.key) + (p.kind === 'angle' ? ' (°)' : '')), i)); }
+    for (const p of sizeParams(fam)) {
+      const i = valueControl({ p, value: v[p.key], L, units: () => A.units(), parseLen, t, materials: materialList(), attrs: { [attr]: p.key }, onChange: () => {} });
+      box.append(p.kind === 'yesno' ? el('label', { className: 'bc-fam-yn' }, i, p.label || p.key) : el('label', {}, el('span', {}, (p.label || p.key) + (p.kind === 'angle' ? ' (°)' : '')), i));   // i18n-ignore: a degree sign
       ins.push([p, i]);
     }
     const value = () => {
       const out = {};
-      for (const [p, i] of ins) {
-        if (p.kind === 'yesno') { out[p.key] = i.checked ? 1 : 0; continue; }
-        const n = p.kind === 'length' ? parseLen(i.value, A.units()) : Number(String(i.value).replace(',', '.'));
-        if (!Number.isFinite(n)) return null;
-        out[p.key] = n;
-      }
+      for (const [p, i] of ins) { const n = readControl(p, i, { parseLen, units: () => A.units() }); if (n === null) return null; out[p.key] = n; }
       return out;
     };
     return { box, value };
+  }
+  /** The project's materials as [[id, name]] (family parameters of kind material pick from them). */
+  function materialList() {
+    try { const w = W(); return w ? readMaterials(w).map((m) => [m.id, m.name]) : []; } catch (e) { return []; }
   }
 
   function openFamily(key) {
@@ -171,7 +180,7 @@ export function mountFamilies(modelUi) {
     if (editable) {
       buttons.push(btn('edit', t('fam.edit'), { 'data-fam-edit': '' }, true), btn('dup', t('fam.dup'), { 'data-fam-dup': '' }));
       if (fam.host !== 'wall') buttons.push(btn('place', t('fam.place'), { 'data-fam-place': '' }));
-      buttons.push(btn('file', t('fam.file'), { 'data-fam-file': '' }), btn('ifc', t('fam.ifc'), { 'data-fam-ifc': '' }));
+      buttons.push(btn('file', t('fam.file'), { 'data-fam-file': '' }), btn('ifc', t('fam.ifc'), { 'data-fam-ifc': '' }), btn('csvin', t('fam.csv.import'), { 'data-fam-csvin': '' }), btn('csvout', t('fam.csv.export'), { 'data-fam-csvout': '' }));
       if (f?.source === 'project' && !f.count) buttons.push(btn('delete', t('fam.delete'), { 'data-fam-delete': '' }));
     }
     buttons.push(btn('close', t('model.sh.close')));
@@ -181,6 +190,8 @@ export function mountFamilies(modelUi) {
       if (what === 'place') { setTimeout(() => startPlace(key), 0); return null; }
       if (what === 'dup') { e.preventDefault(); dupDialog(key, fam); return null; }
       if (what === 'file') { e.preventDefault(); saveFile(key); return null; }
+      if (what === 'csvout') { e.preventDefault(); saveCsv(key); return null; }
+      if (what === 'csvin') { e.preventDefault(); openCsv(key); return null; }
       if (what === 'ifc') { e.preventDefault(); saveIfc(key).catch((x) => say(String(x.message || x))); return null; }
       if (what === 'delete') return run(removeFamily(key), { label: fam.name, verb: t('model.verb.deleted') });
       return null;
@@ -228,7 +239,7 @@ export function mountFamilies(modelUi) {
     fillBase();
   }
   function openFile() {
-    const input = el('input', { type: 'file', accept: '.ccfamily.json,.json,.ifc', hidden: true, 'data-fam-fileinput': '' });
+    const input = el('input', { type: 'file', accept: '.ccfamily.json,.ccfamilies.json,.json,.ifc', hidden: true, 'data-fam-fileinput': '' });
     input.addEventListener('change', async () => {
       const file = input.files?.[0];
       input.remove();
@@ -237,7 +248,15 @@ export function mountFamilies(modelUi) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         let list;
         if (/\.ifc$/i.test(file.name)) list = await (await scratch()).familiesIn(bytes);
-        else { try { list = [JSON.parse(new TextDecoder().decode(bytes))]; } catch (e) { A.host.status(t('fam.err.notfamily'), true); return; } }
+        else {
+          let parsed;
+          try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { A.host.status(t('fam.err.notfamily'), true); return; }
+          if (parsed && parsed.format === 'cadcraft-family-library') {   // 0.8 BIM-FAM-MORE step 8: a library file brings every family it holds
+            const lib = readFamilyLibrary(parsed);
+            if (!lib.ok) { A.host.status(t(lib.key), true); return; }
+            list = lib.list;
+          } else list = [parsed];
+        }
         if (!list.length) { A.host.status(t('fam.err.nonein'), true); return; }
         const keys = list.map(() => newFamilyKey());
         const why = run(importFamilies(list, { keys }), { label: list.length === 1 ? String(list[0]?.name || file.name) : file.name, verb: t('model.verb.made') });
@@ -248,16 +267,86 @@ export function mountFamilies(modelUi) {
     input.click();
   }
   const baseName = (key) => String(familyFile(W(), key)?.name || key).replace(/[\\/:*?"<>|]+/g, ' ').trim();
+  /** The sizes as a table to save (family-csv.js). */
+  function saveCsv(key) {
+    const text = sizesCsv(W(), key);
+    if (text) A.host.download(baseName(key) + ' ' + t('fam.csv.suffix') + '.csv', new TextEncoder().encode(text), 'text/csv');
+  }
+  /** Sizes from a table: the file is read as text (untrusted), made in one step; the dialog says how many and what it left out. */
+  function openCsv(key) {
+    const input = el('input', { type: 'file', accept: '.csv,.tsv,.txt,text/csv', hidden: true, 'data-fam-csvinput': '' });
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      let text = '';
+      try { text = await file.text(); } catch (e) { say(t('fam.err.read', { why: e.message || e })); return; }
+      let res = null;
+      const why = run((ed) => { res = importSizes(key, text)(ed); return res; }, { label: file.name, verb: t('model.verb.made') });
+      if (why) { say(why); return; }
+      const r = res || {};
+      A.host.status(t('fam.csv.done', { n: r.added ?? 0, skipped: r.skipped ?? 0 }), false, true);
+    });
+    A.root.append(input);
+    input.click();
+  }
   function saveFile(key) {
     const file = familyFile(W(), key);
     if (!file) return;
     A.host.download(baseName(key) + '.ccfamily.json', new TextEncoder().encode(JSON.stringify(file, null, 2) + '\n'), 'application/json');
+  }
+  /** Every family of this project as one library file (.ccfamilies.json): another project opens it with Open a family file… (0.8 BIM-FAM-MORE step 8). */
+  function saveLibrary() {
+    const lib = familyLibrary(W(), String(A.host.fileName?.() || '').replace(/\.ifc$/i, ''));
+    if (!lib.families.length) { A.host.status(t('fam.err.nolibrary'), true); return; }
+    A.host.download((lib.name || t('fam.savelib.name')).replace(/[\\/:*?"<>|]+/g, ' ').trim() + '.ccfamilies.json', new TextEncoder().encode(JSON.stringify(lib, null, 2) + '\n'), 'application/json');
+    A.host.status(t('fam.savelib.done', { n: lib.families.length }));
   }
   async function saveIfc(key) {
     const file = familyFile(W(), key);
     if (!file) return;
     const bytes = await (await scratch()).library(file);
     A.host.download(baseName(key) + ' ' + t('fam.ifc.suffix') + '.ifc', bytes, 'application/x-step');
+  }
+
+  // ---- 0.8 BIM-FAM-MORE: the family library as a Library item kind (kind family): the public list, then one item.json whose `family` is read as untrusted data ----
+  const LIB_FAMILIES = '/api/v1/library/items?kind=family&per=50';
+  async function libraryItems() {
+    const r = await fetch(LIB_FAMILIES, { headers: { Accept: 'application/json' } });
+    const list = (await r.json()).data?.items;
+    if (!r.ok || !Array.isArray(list)) throw new Error('list');
+    return list.map((x) => ({ uuid: String(x.uuid), name: String(x.name || ''), description: String(x.description || '') }));
+  }
+  /** One Library family → the recipe (a record of kind family whose block is the recipe), or null. */
+  async function libraryFamily(uuid) {
+    const r = await fetch('/api/v1/library/items/' + encodeURIComponent(uuid), { headers: { Accept: 'application/json' } });
+    const d = (await r.json()).data?.item;
+    if (!r.ok || !d?.version) return null;
+    const f = await fetch('/api/v1/library/items/' + encodeURIComponent(uuid) + '/' + d.version + '/item.json');
+    const json = await f.json();
+    return f.ok && json?.kind === 'family' && json.family && typeof json.family === 'object' ? json.family : null;
+  }
+  async function openLibrary() {
+    if (!A.ed()) { A.host.status(t('model.needs.ifc')); return; }
+    let rows = null, failed = false;
+    try { rows = await libraryItems(); } catch (e) { failed = true; }
+    const add = async (x, b) => {
+      b.disabled = true;
+      try {
+        const rec = await libraryFamily(x.uuid);
+        if (!rec) { A.host.status(t('fam.lib.bad'), true); b.disabled = false; return; }
+        const key = newFamilyKey();
+        const why = run(importFamilies([rec], { keys: [key] }), { label: x.name || String(rec.name || ''), verb: t('model.verb.made') });
+        if (why) { A.host.status(why, true); b.disabled = false; return; }
+        A.host.status(t('fam.lib.added', { name: x.name || String(rec.name || '') }));
+        dlg.close();
+        setTimeout(() => openFamily(key), 0);
+      } catch (e) { A.host.status(t('fam.lib.offline'), true); b.disabled = false; }
+    };
+    const body = failed ? [el('p', { className: 'bc-muted', 'data-famlib-offline': '' }, t('fam.lib.offline'))]
+      : !rows.length ? [el('p', { className: 'bc-muted', 'data-famlib-none': '' }, t('fam.lib.none'))]
+        : [el('table', { 'data-famlib': '' }, el('tbody', {}, ...rows.map((x) => { const b = small({ 'data-famlib-add': x.uuid }, t('fam.lib.add'), () => add(x, b)); return el('tr', { 'data-famlib-row': x.uuid }, el('td', {}, x.name, x.description ? el('span', { className: 'bc-muted' }, ' - ' + x.description) : null), el('td', {}, b)); })))];
+    const dlg = dialog({ 'data-famlib-dialog': '' }, t('fam.lib.title'), [...body, el('p', { className: 'bc-muted' }, t('fam.lib.note'))], [btn('close', t('model.sh.close'))], () => null);
   }
 
   /** Every family in one dialog (the toolbar's Families…): the same list as the project browser's group. */
@@ -274,11 +363,20 @@ export function mountFamilies(modelUi) {
         R.fams.length ? el('table', { 'data-famlist': '' }, el('thead', {}, el('tr', {}, el('th', {}, t('fam.family')), el('th', { className: 'bc-fam-n' }, t('fam.list.sizes')), el('th', { className: 'bc-fam-n' }, t('fam.placed')), el('th', {}, ''))),
           el('tbody', {}, ...mine.map(rowOf), ...guess.map(rowOf))) : el('p', { className: 'bc-muted' }, t('fam.list.none')),
         guess.length ? el('p', { className: 'bc-muted' }, t('fam.list.guessnote')) : null,
+        // 0.7 BIM-FAM-MORE (5): the project's detail level for families (what is saved in the solids and drawn in the plan symbols)
+        el('div', { className: 'bc-fam-grid', 'data-famlist-detailbox': '' }, el('label', {}, el('span', {}, t('fam.detail')), (() => {
+          const s = el('select', { className: 'select-cc', 'data-famlist-detail': '', title: t('fam.detail.note') }, ...DETAIL_CHOICES.map((k) => el('option', { value: k, selected: k === (R.detail || 'auto') }, t('fam.detail.' + k))));
+          s.addEventListener('change', () => { const why = run(setFamilyDetail(s.value), { label: t('fam.detail'), verb: t('model.verb.changed') }); if (why) { say(why); s.value = R.detail || 'auto'; } });
+          return s;
+        })())),
+        el('p', { className: 'bc-muted' }, t('fam.detail.note')),
         el('details', { 'data-famlist-starters': '' }, el('summary', {}, t('fam.pb.starters') + ' (' + startersLeft.length + ')'),   // i18n-ignore: a count in brackets
           el('p', { className: 'bc-fam-acts' }, ...startersLeft.map((k) => small({ 'data-famlist-starter': k }, starterRecipe(k).name, () => { R.dlg?.el?.close(); setTimeout(() => openFamily(k), 0); })))),
         el('p', { className: 'bc-fam-acts' },
           small({ 'data-famlist-new': '' }, t('fam.new'), () => { R.dlg?.el?.close(); setTimeout(openNew, 0); }, 'bi-plus-lg'),
           small({ 'data-famlist-file': '' }, t('fam.openfile'), () => { R.dlg?.el?.close(); openFile(); }, 'bi-folder2-open'),
+          small({ 'data-famlist-lib': '' }, t('fam.lib.open'), () => { R.dlg?.el?.close(); setTimeout(openLibrary, 0); }, 'bi-cloud-arrow-down'),   // 0.8 BIM-FAM-MORE: families in the Library
+          mine.some((f) => f.key && f.source !== 'starter') ? small({ 'data-famlist-savelib': '' }, t('fam.savelib'), saveLibrary, 'bi-box-arrow-down') : null,
           small({ 'data-famlist-place': '' }, t('fam.place'), () => startPlace(R.place.key), 'bi-box')),
       ];
     };
@@ -294,9 +392,10 @@ export function mountFamilies(modelUi) {
     const values = f?.sizes.find((z) => z.guid || z.legacy)?.values || sizeValues(fam, {});
     openFamilyEditor({
       root: A.root, t, units: () => A.units(), recipe: JSON.parse(JSON.stringify(fam)), values, starter: !!fam.starter, scratch,
+      materials: materialList(), detail: R.detail || 'auto', getFamily: (k) => recipeOf(k), families: () => R.fams.filter((f2) => f2.source !== 'guess' && f2.key).map((f2) => [f2.key, f2.name]),
       // a starter edited here is kept in this file under its key: other files keep the starter as it is
       onSave: (recipe) => run(saveFamily(recipe), { label: recipe.name, verb: t('model.verb.changed') }),
-      onClose: () => { read(); R.dlg?.redraw(); },
+      onClose: () => { read(); R.dlg?.redraw(); A.root.querySelector('[data-res-tools] > summary')?.focus?.(); },   // the focus goes back to the Build menu, not to the page
     });
   }
 
@@ -361,6 +460,88 @@ export function mountFamilies(modelUi) {
     if (why) A.host.status(why, true);
   }
 
+  /** The parameters placed elements set themselves (instance parameters), as Properties rows: items = [{ guid, family, instance }]. */
+  function instanceFields(items, kit, meta = null) {
+    const fam = items.length ? recipeOf(items[0].family) : null;
+    if (!fam || !items.every((i) => i.family === items[0].family)) return;
+    const mats = materialList();
+    for (const p of instanceParams(fam)) {
+      const vals = items.map((i) => (i.instance || {})[p.key] ?? p.value), same = vals.every((v) => v === vals[0]);
+      const ctl = valueControl({ p, value: same ? vals[0] : (isWordKind(p.kind) ? '' : NaN), L, units: () => A.units(), parseLen, t, materials: mats, attrs: { 'data-mp-inst': p.key }, onChange: (v) => {
+        if (v === null) return;
+        A.commit(setFamilyInstance(items.map((i) => i.guid), { [p.key]: v }), meta || kit.meta || { label: fam.name, verb: t('model.verb.changed') });
+      } });
+      kit.field(p.label || p.key, ctl);
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------- hotspots in the plan
+  /** The picked family element when exactly one is picked and its family has hotspots. */
+  function hotspotElement() {
+    const keys = A.selectedKeys();
+    if (keys.length !== 1) return null;
+    const e = R.elements.find((x) => x.id === keys[0] - A.kb());
+    let fam = null;
+    try { fam = e ? recipeOf(e.family) : null; } catch (x) { return null; }   // the model is being rebuilt
+    return e && fam?.hotspots?.length ? { e, fam } : null;
+  }
+  /** Its hotspots in the plan: [{ id, axis, kind, p: [x, y], q: [x, y] | null }], at the dragged size when one is being dragged. */
+  function planHotspots(h) {
+    const { e, fam } = h;
+    const values = R.hot && R.hot.guid === e.guid && R.hot.values ? { ...R.hot.values, ...e.instance } : { ...e.values, ...e.instance };
+    let ev;
+    try { ev = evaluateFamily(fam, values, evalCtx(W())); } catch (x) { return []; }
+    if (!ev.ok) return [];
+    const a = e.rot * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), T = (pt) => [e.x + pt[0] * c - pt[1] * s, e.y + pt[0] * s + pt[1] * c];
+    return (ev.hotspots || []).filter((x) => x.axis !== 'z').map((x) => ({ id: x.id, name: x.name, axis: x.axis, kind: x.kind, p: T(x.p), q: x.q ? T(x.q) : null }));
+  }
+  // ---- 0.8 BIM-FAM-MORE: the same hotspots as grips in the 3D view (every axis, z too); dragging one resizes the family element like the plan grip does ----
+  /** The hotspots of the picked element in model mm (the element's turn and level height applied): [{ id, axis, kind, at: [x, y, z] (grip), dir: [dx, dy, dz] (the axis), from: family value }]. */
+  function hotspots3d(h, values) {
+    const { e, fam } = h;
+    let ev;
+    try { ev = evaluateFamily(fam, values, evalCtx(W())); } catch (x) { return []; }
+    if (!ev.ok) return [];
+    const lv = (A.S.data?.levels || []).find((l) => l.id === e.storey), z0 = lv?.elevation || 0;
+    const a = e.rot * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), T = (pt) => [e.x + pt[0] * c - pt[1] * s, e.y + pt[0] * s + pt[1] * c, z0 + pt[2]];
+    return (ev.hotspots || []).map((x) => {
+      const m = x.q ? [(x.p[0] + x.q[0]) / 2, (x.p[1] + x.q[1]) / 2, (x.p[2] + x.q[2]) / 2] : x.p;
+      return { id: x.id, name: x.name, axis: x.axis, kind: x.kind, at: T(m), dir: x.axis === 'x' ? [c, s, 0] : x.axis === 'y' ? [-s, c, 0] : [0, 0, 1], local: m };
+    });
+  }
+  let g3 = null;   // { h, list, drag }
+  function sync3d() {
+    if (typeof A?.host?.grips3d !== 'function') return;
+    const h = hotspotElement();
+    if (!h || R.hot) { if (g3 && !R.hot) { g3 = null; A.host.grips3d(null); } return; }
+    const list = hotspots3d(h, { ...h.e.values, ...h.e.instance });
+    if (!list.length) { if (g3) { g3 = null; A.host.grips3d(null); } return; }
+    g3 = { h, list, drag: null };
+    const ok = A.host.grips3d(list.map((x) => ({ p: x.at, kind: x.kind === 'edge' ? 'edge' : 'corner' })), {
+      start(i) { g3.drag = { i, values: null }; },
+      move(i, ray) {
+        const x = g3?.list[i];
+        if (!x || !g3.drag) return;
+        const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+        const w = [x.at[0] - ray.o[0], x.at[1] - ray.o[1], x.at[2] - ray.o[2]], b = dot(x.dir, ray.d), cc = dot(ray.d, ray.d), d = dot(x.dir, w), ee = dot(ray.d, w), den = cc - b * b;
+        if (!(Math.abs(den) > 1e-9)) return;   // looking along the axis: no place to read
+        const tt = (b * ee - cc * d) / den;
+        const to = [x.local[0], x.local[1], x.local[2]];
+        to['xyz'.indexOf(x.axis)] += tt;
+        let r = { ok: false };
+        try { r = dragHotspot(g3.h.fam, { ...g3.h.e.values, ...g3.h.e.instance }, x.id, to, evalCtx(W())); } catch (err) { /* rebuilding */ }
+        if (r.ok) { g3.drag.values = r.values; g3.drag.moved = x.axis; }
+      },
+      end() {
+        const dr = g3?.drag, hh = g3?.h;
+        if (!dr?.values || !hh) return;
+        A.commit(resizeFamilyElements([hh.e.guid], dr.values), { label: hh.fam.name, verb: t('model.verb.changed') });
+      },
+    });
+    if (!ok) g3 = null;
+  }
+  const nearSeg = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy, k = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2)) : 0; return Math.hypot(p[0] - (a[0] + k * dx), p[1] - (a[1] + k * dy)); };
+
   // ---------------------------------------------------------------------------------------------- picked family elements
   function pick(key) {
     const id = key - A.kb(), e = R.elements.find((x) => x.id === id);
@@ -386,6 +567,7 @@ export function mountFamilies(modelUi) {
       r.addEventListener('change', () => { const v = Number(r.value.replace(',', '.')); if (Number.isFinite(v)) A.commit(moveFamilyElement(e.guid, { rot: v }), meta); else r.value = String(e.rot); });
       kit.field(t('fam.turn.deg'), r);
     }
+    if (same) instanceFields(els, kit, meta);   // 0.7 BIM-FAM-MORE (7): the parameters each element sets itself
     if (same) kit.field(t('fam.family'), kit.button(t('fam.open'), 'data-mp-famopen', () => openFamily(fam0)));
     return { title };
   }
@@ -400,15 +582,54 @@ export function mountFamilies(modelUi) {
     key(e, low) { if (A.S.tool === 'family' && low === 'r' && !e.ctrlKey && !e.metaKey) { R.place.rot = (R.place.rot + 90) % 360; A.drawOverlay(); return true; } return false; },
     escape() { return false; },
     toolChanged(name) { R.place.at = null; if (name === 'family') fillPlace(); },
-    overlay(o) { if (A.S.tool === 'family' && R.place.at) { o.lines.push(...ghost(R.place.at)); o.snap = { p: R.place.at, kind: 'free' }; } },
-    refresh() { read(); if (A.S.tool === 'family') fillPlace(); R.dlg?.redraw(); },
+    overlay(o) {
+      if (A.S.tool === 'family' && R.place.at) { o.lines.push(...ghost(R.place.at)); o.snap = { p: R.place.at, kind: 'free' }; }
+      const h = A.S.tool === 'select' ? hotspotElement() : null;
+      if (h) for (const x of planHotspots(h)) { if (x.q) o.lines.push([x.p[0], x.p[1], x.q[0], x.q[1]]); (o.points ||= []).push(x.q ? [(x.p[0] + x.q[0]) / 2, (x.p[1] + x.q[1]) / 2] : x.p); }   // grips: a point, an edge's middle
+    },
+    down(p) {
+      const h = A.S.tool === 'select' ? hotspotElement() : null;
+      if (!h || !A.pv()) return false;
+      const tol = A.pv().pxToMm(10);
+      const x = planHotspots(h).find((q) => (q.q ? nearSeg(p, q.p, q.q) : Math.hypot(p[0] - q.p[0], p[1] - q.p[1])) <= tol);
+      if (!x) return false;
+      R.hot = { guid: h.e.guid, id: x.id, el: h.e, fam: h.fam, values: null };
+      return true;
+    },
+    drag(p) {
+      if (!R.hot) return;
+      const { el: e, fam } = R.hot, a = -e.rot * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+      const dx = p[0] - e.x, dy = p[1] - e.y, to = [dx * c - dy * s, dx * s + dy * c, 0];   // the pointer in the family's own axes
+      let r = { ok: false };
+      try { r = dragHotspot(fam, { ...e.values, ...e.instance }, R.hot.id, to, evalCtx(W())); } catch (x) { /* rebuilding */ }
+      if (r.ok) R.hot.values = r.values;
+      A.drawOverlay(); A.buildScene();
+    },
+    up(p, e0, { moved, cancel }) {
+      const h = R.hot; R.hot = null;
+      if (!h || !moved || cancel || !h.values) { A.buildScene(); return; }
+      A.commit(resizeFamilyElements([h.guid], h.values), { label: h.fam.name, verb: t('model.verb.changed') });
+    },
+    refresh() { read(); if (A.S.tool === 'family') fillPlace(); R.dlg?.redraw(); g3 = null; sync3d(); },
+    // 0.7 BIM-FAM-MORE (2): a family with a 2D symbol is drawn from it in the plan (the cut of its solids is skipped for it)
+    ownKeys(set, k) { for (const e of R.elements) if (symbolFamily(e)) set.add(k + e.id); },
+    scene(scene) {
+      const k = A.kb(), cutZ = scene.cutZ ?? 1200;
+      for (const e of R.elements) {
+        const fam = symbolFamily(e);
+        if (!fam || e.storey !== A.S.level) continue;
+        const ev = evaluateFamily(fam, { ...e.values, ...e.instance }, { detail: detailForScale(R.detail, scene.scale), resolve: (k) => recipeOf(k) });
+        if (!ev.ok || !ev.symbol?.length) continue;
+        scene.symbols.push(...symbolScene(ev.symbol, e, cutZ, k + e.id, (ring, pattern) => { try { return hatchSegments(ring, [], pattern, 1); } catch (x) { return []; } }));
+      }
+    },
     browserGroups,
-    pick, props,
+    pick, props, instanceFields,
     remove(items) { return removeFamilyElements(items.map((i) => i.guid)); },
     openFamily,
   });
   for (const b of A.root.querySelectorAll('[data-fam-list]')) b.addEventListener('click', () => { b.closest('details')?.removeAttribute('open'); if (!A.ed()) { A.host.status(t('model.needs.ifc')); return; } openList(); });
-  const api = { openFamily, editFamily, openNew, openList, openFile, startPlace, saveFile, saveIfc, read };
+  const api = { openLibrary, sync3d, grips3d: () => g3 && { n: g3.list.length, ids: g3.list.map((x) => x.id) }, openFamily, editFamily, openNew, openList, openFile, startPlace, saveFile, saveIfc, read };
   if (typeof window !== 'undefined') window.bimcraftFamilies = { state: R, api };   // for tests
   return api;
 }

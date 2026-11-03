@@ -15,7 +15,7 @@ Draw the walls of a building on a plan of each level. Click where a wall starts 
 1. Start a new building ([Start a new building](topic:start-a-new-building)) or open an IFC model.
 2. Click {{ui:Draw}} in the toolbar. A new building opens with it on already.
 3. The plan of a level shows on the left and the 3D view on the right. Pick the level in the list at the top of the plan, or with the round button beside it in the **Levels** panel.
-4. Use {{ui:Plan}} for the plan alone, {{ui:Split}} for both, {{ui:3D}} to close the plan. When the window is narrow (or the interface size large), {{ui:Split}} puts the plan above the 3D view instead of beside it.
+4. {{ui:Plan}}, {{ui:Split}} and {{ui:3D}} are tools in the {{ui:View}} row of the toolbar (the commands PLAN, SPLIT and the keys work as before). Use {{ui:Plan}} for the plan alone, {{ui:Split}} for both, {{ui:3D}} to close the plan. When the window is narrow (or the interface size large), {{ui:Split}} puts the plan above the 3D view instead of beside it.
 
 The plan cuts the level 4'-0" (1200 mm) above its floor, as a floor plan does. Scroll to zoom, drag with the middle or right button (or hold {{key:Space}} and drag) to pan; with {{ui:Select}} on, a plain drag pans too. {{key:F}} with the pointer over the plan fits it.
 
@@ -23,7 +23,7 @@ The plan cuts the level 4'-0" (1200 mm) above its floor, as a floor plan does. S
 
 1. Click {{ui:Wall}} (or press {{key:W}}).
 2. Choose the wall type in the first list, for example **Exterior 2×6** or **Interior 2×4**.
-3. Choose its height: **Up to the level above** (the wall follows if that level moves) or **Fixed height** and type it.
+3. Choose its height: **Up to the level above** (the wall follows if that level moves), **Up to** a level further up for a wall that runs through several levels (a stair hall, a double-height room, a tall gable), or **Fixed height** and type it. A wall like that belongs to the level you drew it on; the plans of the levels it passes show it lighter, the rooms there close against it, and you can click doors and windows into it from those plans (a door stands on that level's floor). To move or reshape the wall itself, go to the level it starts on.
 4. Click where the first wall starts.
 5. Click each corner. Every click makes a wall; the next one starts where it ended. The length and angle show beside the pointer.
 6. Click the first point again to close the room. The status line says how many walls the room has, and in centerline mode every wall gets its outside layer on the outside of the room.
@@ -33,7 +33,7 @@ The corners join by themselves: two walls meet at a mitre, a wall that ends on a
 
 ## Choose the drawing reference
 
-Choose **Centerline**, **Inside face** or **Outside face** before the first click. With a face selected, your clicks and typed lengths describe that face; BimCraft offsets the wall centerline by half the total thickness and joins consecutive corners. Choose **Outside on left** or **Outside on right** relative to the direction you draw. For a closed outline drawn counterclockwise, the outside is on the right; clockwise, on the left. Face drawing keeps your chosen outside side when you close the loop. Centerline drawing still sets the outside automatically on closing.
+Choose **Centerline**, **Inside face** or **Outside face** before the first click. With a face selected, your clicks and typed lengths describe that face; BimCraft offsets the wall centerline by half the total thickness and joins consecutive corners. Choose **Outside on left** or **Outside on right** relative to the direction you draw. For a closed outline drawn counterclockwise, the outside is on the right; clockwise, on the left. With **Inside face** the wall's body goes to the outside side of your line; with **Outside face**, to the other side. Face drawing keeps your chosen outside side when you close the loop. On the centerline, walls that do not close a room take the outside side you chose; closing a room sets every wall's outside to the outside of the room by itself, whichever way you drew it.
 
 Changing the wall type, reference or outside side ends the current chain. Near a reversing corner, long mitres are capped by leaving square ends.
 
@@ -85,7 +85,8 @@ The **Levels** panel lists every level with its elevation and height.
 
 - Type a new name, elevation or height and press {{key:Enter}}. Changing a level's height (or elevation) moves the levels above it by the same amount, and walls that run up to a level follow.
 - {{ui:Add a level on top}} adds a level above the top one, as tall as it.
-- **Units** chooses feet and inches or millimeters for everything the drawing tools show and read.
+- {{ui:Copy this level…}} draws what is on the level you are looking at again on another level, or on a new one on top: its walls with their doors and windows, floors and ceilings (not roofs). Walls that ran up to the level above run up to the level above the new one; rooms appear by themselves. One {{ui:Undo}} takes all of it back. If the other level already has walls, the copy is added to them.
+- {{ui:Units}} on the toolbar chooses the units (feet and inches, inches, decimal feet, millimeters, centimeters or meters) for everything the drawing tools show and read.
 
 ## Save
 

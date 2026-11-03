@@ -34,7 +34,7 @@ const adminPhp = path.join(REPO, 'tools/cadcraft-test/admin.php');
 const minted = JSON.parse(execFileSync('sudo', ['-u', 'www-data', 'php', adminPhp, 'session', 'bimmodel'], { encoding: 'utf8' }));
 
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--host-resolver-rules=MAP getcadcraft.com 127.0.0.1', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
+const ctx = await browser.newContext({ viewport: { width: 1920, height: 1200 }, acceptDownloads: true });
 const problems = [];
 const page = await ctx.newPage();
 page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()); });
@@ -45,8 +45,10 @@ const style = () => page.evaluate(() => window.ccInput.current().id);
 const visible = (sel) => page.isVisible(sel);
 const settled = () => page.waitForFunction(() => { const s = window.bimcraftPlan?.state; return s && !s.busy && !s.reloading && !s.queue.length; }, null, { timeout: 60000 });
 const openSettings = async () => { await page.keyboard.press('Control+Comma'); await page.waitForSelector('[data-app-settings][open]'); };
+// Settings shows one section at a time (0.7 sections): bring the one that holds `sel` forward before clicking in it
+const showSection = async (sel) => { await page.evaluate((q) => { const nav = document.querySelector('[data-app-settings] .shell-sec-nav'); const hit = [...(nav ? nav.querySelectorAll('button') : [])].find((b) => b.ccSet && b.ccSet.querySelector(q)); if (hit) hit.click(); }, sel); await page.waitForTimeout(150); };
 const closeSettings = async () => { await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[data-app-settings]').open); };
-const pickStyle = async (id) => { await openSettings(); await page.click(`[data-input-settings] input[value="${id}"]`, { force: true }); await closeSettings(); };
+const pickStyle = async (id) => { await openSettings(); await page.$eval(`[data-input-settings] input[value="${id}"]`, (el) => el.click()); await closeSettings(); };
 const pan = () => page.evaluate(() => [window.bimcraftPlan.view.cx, window.bimcraftPlan.view.cy]);
 async function dragPlan(button) {
   const r = await page.evaluate(() => { const b = window.bimcraftPlan.view.canvas.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height * 0.6]; });
@@ -81,15 +83,17 @@ try {
   await openSettings();
   const w = await page.evaluate(() => document.querySelector('[data-app-settings]').getBoundingClientRect().width);
   ok(w > 700, 'Settings is wider with BimCraft\'s panel: ' + Math.round(w) + ' px');
-  const cols = await page.evaluate(() => getComputedStyle(document.querySelector('[data-settings-pane="app"]')).gridTemplateColumns.split(' ').length);
-  ok(cols === 2, 'BimCraft\'s settings in two columns');
+  // since the 0.7 sections (app-shell.css § 0.7 sections) the dialog is two columns: the section list, then one section at a time
+  const cols = await page.evaluate(() => ({ body: getComputedStyle(document.querySelector('[data-app-settings] .shell-dlg-body')).gridTemplateColumns.split(' ').length,
+    nav: !!document.querySelector('[data-app-settings] .shell-sec-nav') }));
+  ok(cols.body === 2 && cols.nav, 'BimCraft\'s settings: the section list beside the section ' + JSON.stringify(cols));
   ok((await page.$$('[data-input-settings] .cc-in-card')).length === 5, 'five style cards (Viewer since 0.5 IP.3)');
   await shot(page, 'in-01-settings');
-  await page.click('[data-input-settings] input[value="home"]', { force: true });
+  await page.$eval('[data-input-settings] input[value="home"]', (el) => el.click());   // the radio is visually hidden behind its card: click it in the page
   await closeSettings();
 
   console.log('== Home design');
-  ok(await style() === 'home' && await visible('[data-input-bar] .cc-in-menus') && !(await visible('[data-toolbar] > [data-view="iso"]')), 'Home design: a menu bar instead of the toolbar buttons');
+  ok(await style() === 'home' && await visible('[data-input-bar] .cc-in-menus') && !(await visible('[data-toolbar] .bc-tool-row > [data-view="iso"]')), 'Home design: a menu bar instead of the toolbar buttons');
   const titles = await page.$$eval('[data-input-bar] .cc-in-menus > details > summary', (s) => s.map((x) => x.textContent));
   ok(titles.slice(0, 8).join() === 'File,Edit,Build,Library,3D,CAD,Tools,View', 'menus: ' + titles.join(', '));
   await page.waitForFunction(() => document.querySelector('[data-modelbar]').getBoundingClientRect().top >= document.querySelector('[data-toolbar]').getBoundingClientRect().bottom, null, { timeout: 3000 }).catch(() => {});   // the model bar follows the bar's height a frame later
@@ -112,7 +116,7 @@ try {
 
   console.log('== BIM ribbon');
   await pickStyle('ribbon');
-  ok(await visible('[data-input-bar] .cc-in-tabs') && (await page.$$eval('[data-input-bar] [role="tab"]', (b) => b.map((x) => x.textContent))).join() === 'Architecture,Insert,Annotate,Modify,View,Output', 'ribbon tabs');
+  ok(await visible('[data-input-bar] .cc-in-tabs') && (await page.$$eval('[data-input-bar] [role="tab"]', (b) => b.map((x) => x.textContent))).join().replace(/,Add-ons$/, '') === 'Architecture,Insert,Annotate,Modify,View,Output', 'ribbon tabs (an Add-ons tab may follow)');
   await shot(page, 'in-03-ribbon');
   await page.keyboard.press('w'); await page.keyboard.press('a');
   ok(await tool() === 'wall', 'W then A = Wall');
@@ -153,6 +157,7 @@ try {
   console.log('== Customize → My Home design, export, import');
   await pickStyle('home');
   await openSettings();
+  await showSection('[data-input-settings]');
   await page.click('[data-input-settings] button:text("Customize…")');
   await page.waitForSelector('dialog.cc-in-dlg[open]');
   await page.fill('.cc-in-dlg input[type="search"]', 'roof');
@@ -189,7 +194,7 @@ try {
   ok(/2 things in it were left out/.test(await statusOf()) && await style() !== 'home', 'Import: added, the unknown command and the bad key left out — ' + await statusOf());
   await page.click('[data-input-settings] button:text("Delete this style")');
   ok((await page.$$('[data-input-settings] .cc-in-card')).length === 6, 'Delete this style');
-  await page.click('[data-input-settings] input[value="cadcraft"]', { force: true });
+  await page.$eval('[data-input-settings] input[value="cadcraft"]', (el) => el.click());
   await closeSettings();
   ok(await visible('[data-toolbar] [data-view="iso"]') && !(await visible('[data-input-bar]')), 'back to CadCraft: the toolbar as it was');
   ok(await page.evaluate(() => { const c = document.querySelector('[data-canvas]').viewer.controls.mouseButtons; return c.LEFT === 0 && c.MIDDLE === 1 && c.RIGHT === 2; }), '3D viewer: its own buttons again');

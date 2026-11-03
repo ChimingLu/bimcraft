@@ -61,6 +61,15 @@ export class DrawingView3D {
     this.resizeObserver.observe(canvas.parentElement);
     this.resize();
     this.bind();
+    // 0.8 Track ID: hand the view to the input-device layer (assets/js/app-devices-ui.js) — the same camera calls a drag and the
+    // wheel make (cam.orbit / cam.pan in px, cam.zoomAt toward what is under the point; k < 1 = closer), fit = extents()
+    (window.ccViews ||= []).push({
+      el: canvas, kind: '3d',
+      orbit: (dx, dy) => { this.onUserMove?.(); this.cam.orbit(dx, dy); this.render(); },
+      pan: (dx, dy) => { this.onUserMove?.(); this.cam.pan(dx, dy); this.render(); },
+      zoom: (f, x = canvas.clientWidth / 2, y = canvas.clientHeight / 2) => { if (!(f > 0)) return; this.onUserMove?.(); this.cam.zoomAt(1 / f, x, y, this.hit(x, y)); this.render(); },
+      fit: () => this.extents(),
+    });
   }
 
   applyTheme() {
@@ -329,7 +338,14 @@ export class DrawingView3D {
 
   render() {
     if (this._raf) return;
-    this._raf = requestAnimationFrame(() => { this._raf = 0; this.draw(); });
+    this._raf = requestAnimationFrame(() => {
+      this._raf = 0;
+      try { this.draw(); } finally { const w = this.drawnWaiters; this.drawnWaiters = null; w?.forEach((f) => f()); }
+    });
+  }
+  /** Resolves once the next frame is drawn (bimcraft.js times a drawing's first frame). */
+  whenDrawn() {
+    return new Promise((resolve) => { (this.drawnWaiters ||= []).push(resolve); this.render(); });
   }
   draw() {
     const cam = this.cam;

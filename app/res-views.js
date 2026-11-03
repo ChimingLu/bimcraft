@@ -21,6 +21,7 @@
  *   elevationDirs → { north, east, south, west }   (the elevation named for the side it shows: north = looking south)
  */
 const CREASE = Math.cos(25 * Math.PI / 180);
+import { wallSectionGraphics, wallSurfaceEdges, isolatedWall } from './wall-section-graphics.js';
 
 export const elevationDirs = { north: [0, -1], east: [-1, 0], south: [0, 1], west: [1, 0] };
 
@@ -44,24 +45,33 @@ export function modelTriangles(model, M, { skip = null, classes = null } = {}) {
 }
 
 /** A triangle (9 numbers, view coords x, y, depth) clipped to depth ≥ d0: 0, 1 or 2 triangles. */
-function clipTri(t, d0) {
+function clipTri(t, d0, side = 1) {
   const v = [[t[0], t[1], t[2]], [t[3], t[4], t[5]], [t[6], t[7], t[8]]];
-  const inside = v.map((p) => p[2] >= d0);
+  const inside = v.map((p) => side * (p[2] - d0) >= 0);
   const n = inside.filter(Boolean).length;
   if (n === 3) return [t];
   if (n === 0) return [];
   const out = [];
   for (let i = 0; i < 3; i++) {
     const a = v[i], b = v[(i + 1) % 3];
-    if (a[2] >= d0) out.push(a);
-    if ((a[2] >= d0) !== (b[2] >= d0)) { const f = (d0 - a[2]) / (b[2] - a[2]); out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, d0]); }
+    if (side * (a[2] - d0) >= 0) out.push(a);
+    if ((side * (a[2] - d0) >= 0) !== (side * (b[2] - d0) >= 0)) { const f = (d0 - a[2]) / (b[2] - a[2]); out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, d0]); }
   }
   const res = [];
   for (let i = 1; i + 1 < out.length; i++) res.push([...out[0], ...out[i], ...out[i + 1]]);
   return res;
 }
 
-export function projectView(elements, { dir, cut = null, far = 0, res = 1600, margin = { side: 3000, below: 1500, above: 500 }, box: frame = null } = {}) {
+export function projectView(elements, options = {}) {
+  const { dir, cut, far = 0, walls, openings = [], materials = null } = options;
+  if (!Array.isArray(dir) || dir.length !== 2 || !dir.every(Number.isFinite) || Math.abs(Math.hypot(...dir)-1)>1e-8 || !Number.isFinite(far) || far<0 || (cut && (!Array.isArray(cut.o)||cut.o.length!==2||!cut.o.every(Number.isFinite)))) throw new Error('Invalid projected view plane/depth');   // i18n-ignore: a programming error
+  const byKey = new Map((walls||[]).map(w=>[w.key??w.id,{...w,junctionUnsupported:!isolatedWall(w,walls)}]));
+  const sourced = elements.map(e=>byKey.has(e.key)?{...e,edges:wallSurfaceEdges(byKey.get(e.key),openings)}:e);
+  const view = projectMeshView(sourced, options);
+  return walls ? {...wallSectionGraphics(view, walls, openings, materials, options),groundY:0,...(options.box?{crop:options.box}:{})} : view;
+}
+
+function projectMeshView(elements, { dir, cut = null, far = 0, res = 1600, margin = { side: 3000, below: 1500, above: 500 }, box: frame = null } = {}) {
   const right = [dir[1], -dir[0]];
   const d0 = cut ? cut.o[0] * dir[0] + cut.o[1] * dir[1] : -Infinity, d1 = cut && far > 0 ? d0 + far : Infinity;
   // into view coordinates, behind the cut
@@ -91,11 +101,18 @@ export function projectView(elements, { dir, cut = null, far = 0, res = 1600, ma
         for (let k = 0; k < 3; k++) { const a = [t[3 * k], t[3 * k + 1], t[3 * k + 2]], b = [t[(3 * k + 3) % 9], t[(3 * k + 4) % 9], t[(3 * k + 5) % 9]]; if ((a[2] - c0) * (b[2] - c0) < 0) { const f = (c0 - a[2]) / (b[2] - a[2]); pts.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]); } }
         if (pts.length === 2) segs.push(pts);
       }
-      for (const c of cutting ? clipTri(t, c0) : [t]) tri.push(c);
+      for (const c of cutting ? clipTri(t, c0) : [t]) tri.push(...(Number.isFinite(d1) ? clipTri(c, d1, -1) : [c]));
     }
     if (!tri.length && !segs.length) continue;
     for (const t of tri) for (let k = 0; k < 9; k += 3) { x0 = Math.min(x0, t[k]); x1 = Math.max(x1, t[k]); y0 = Math.min(y0, t[k + 1]); y1 = Math.max(y1, t[k + 1]); dmin = Math.min(dmin, t[k + 2]); dmax = Math.max(dmax, t[k + 2]); }
-    view.push({ key: e.key, cls: e.cls, tri, src: e.tris });
+    const edges = e.edges?.map(pair=>pair.map(([x,y,z])=>[x*right[0]+y*right[1],z,x*dir[0]+y*dir[1]])).flatMap(([a,b])=>{
+      let lo=0,hi=1;const d=b[2]-a[2];
+      if(Math.abs(d)<1e-12)return a[2]>=c0&&a[2]<=d1?[[a,b]]:[];
+      const near=(c0-a[2])/d,far=(d1-a[2])/d;
+      if(d>0){lo=Math.max(lo,near);hi=Math.min(hi,far);}else{lo=Math.max(lo,far);hi=Math.min(hi,near);}
+      return hi>=lo?[[a.map((v,i)=>v+(b[i]-v)*lo),a.map((v,i)=>v+(b[i]-v)*hi)]]:[];
+    });
+    view.push({ key: e.key, cls: e.cls, tri, src: e.tris, edges });
     if (segs.length) cuts.push({ key: e.key, cls: e.cls, loops: chain(segs) });
   }
   if (!view.length) return { lines: [], cuts, bounds: null, n: 0 };
@@ -128,7 +145,7 @@ export function projectView(elements, { dir, cut = null, far = 0, res = 1600, ma
   // feature edges per element, tested against the buffer
   const lines = [];
   for (const v of view) {
-    for (const [a, b] of featureEdges(v.tri)) {
+    for (const [a, b] of v.edges || featureEdges(v.tri)) {
       const L = Math.hypot((b[0] - a[0]) * s, (b[1] - a[1]) * s), n = Math.max(1, Math.ceil(L / 0.75));
       let run = null;
       for (let k = 0; k <= n; k++) {

@@ -8,7 +8,12 @@
  *               color = what the material looks like from afar: the 3D views, exports and files that cannot carry a texture
  *               tex.size = the real size one copy of the texture covers (a brick tile is 4 bricks × 8 courses = 0.9 × 0.6 m)
  *   CATEGORIES  the order the library lists them in
- *   material(id) → the entry | null        isMaterialId(id) → bool
+ *   material(id) → the entry | null        isMaterialId(id) → bool      (the library's, then the open file's own — below)
+ *   setDocumentMaterials(entries)          0.7 MT.1: the open file's node materials (shading/doc.js makes the entries:
+ *                                          {id, cat: 'mine', name, color, rough, metal, glass, tex: null, bump: 0, pbr, layers(size),
+ *                                          mapping, size}); they answer material(id) like the library's, never replacing one
+ *   documentMaterials() → [entry]          materialLayers(id, size) → the baked layers of § 6.6 (RENDER-SPEC) | null
+ *   onMaterialsChanged(fn) → unsubscribe   called after setDocumentMaterials (the views drop their cached textures)
  *   planarUV(p, n, up) → [u, v] metres    where a point of a surface falls on its texture: u runs level along the surface,
  *                                          v runs up it (up a wall, up a roof's slope); a level surface takes u along X, v along Y
  *   planarUVs(positions, normals, up, scale = [1, 1]) → Float32Array    the same for every vertex of a mesh, divided by `scale`
@@ -57,8 +62,28 @@ export const MATERIALS = [
 ];
 
 const BY_ID = new Map(MATERIALS.map((m) => [m.id, m]));
-export const material = (id) => (typeof id === 'string' && BY_ID.get(id)) || null;
-export const isMaterialId = (id) => typeof id === 'string' && BY_ID.has(id);
+const MINE = new Map();   // 0.7 MT.1: the open file's own materials (node graphs), id → entry
+const LISTENERS = new Set();
+export const material = (id) => (typeof id === 'string' && (BY_ID.get(id) || MINE.get(id))) || null;
+export const isMaterialId = (id) => typeof id === 'string' && (BY_ID.has(id) || MINE.has(id));
+
+/** The open file's node materials (MT.1). Ids the library already uses are left out. */
+export function setDocumentMaterials(entries) {
+  MINE.clear();
+  for (const e of Array.isArray(entries) ? entries : []) if (e && typeof e.id === 'string' && !BY_ID.has(e.id)) MINE.set(e.id, e);
+  for (const fn of LISTENERS) { try { fn(); } catch (err) { /* a listener's problem is its own */ } }
+}
+export const documentMaterials = () => [...MINE.values()];
+export function onMaterialsChanged(fn) { LISTENERS.add(fn); return () => LISTENERS.delete(fn); }
+/** The open file's decals (0.7 MT.6, shading/decal.js): every renderer draws each one on its placement with its own material. */
+let DECALS = [];
+export function setDocumentDecals(list) { DECALS = Array.isArray(list) ? list.slice() : []; for (const fn of LISTENERS) { try { fn(); } catch (err) { /* the listener's own */ } } }
+export const documentDecals = () => DECALS;
+/** A node material's baked layers ({base, data, emit: Uint8Array size² × 4 | null, size [w, h] metres, flags…}) | null. */
+export function materialLayers(id, size = 512) {
+  const m = MINE.get(id);
+  return m && typeof m.layers === 'function' ? m.layers(size) : null;
+}
 
 /** u level along the surface, v up it (metres). n need not be unit length. */
 export function planarUV(p, n, up = [0, 0, 1]) {

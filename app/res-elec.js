@@ -27,6 +27,7 @@ import { readWalls } from './model-walls.js';
 import { ids, val } from './ifc-util.js';
 import { t as tr } from './i18n.js';
 import { SYMBOLS } from './res-elec-symbols.js';
+import { isMetric } from './model-units.js';
 
 export const ELEC_PSET = 'CadCraft_Electrical';
 const IN = 25.4;
@@ -48,21 +49,40 @@ export const DEVICES = {
   'luminaire.emergency': { ifc4: ['IFCLIGHTFIXTURE', 'SECURITYLIGHTING'], ifc2: 'IFCFLOWTERMINAL', mount: 'ceiling', prefix: 'L', body: box(300, 120, 60) },
   'junction':            { ifc4: ['IFCJUNCTIONBOX', 'POWER'], ifc2: 'IFCFLOWFITTING', mount: 'ceiling', prefix: 'J', body: box(100, 100, 55) },
   'appliance':           { ifc4: ['IFCOUTLET', 'POWEROUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'R', height: { ftin: 16 * IN, mm: 300 }, body: box(110, 18, 130) },
-  'board':               { ifc4: ['IFCELECTRICDISTRIBUTIONBOARD', 'DISTRIBUTIONBOARD'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'P', height: { ftin: 60 * IN, mm: 1500 }, body: box(360, 100, 760) },
+  'board':               { ifc4: ['IFCELECTRICDISTRIBUTIONBOARD', 'DISTRIBUTIONBOARD'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'P', height: { ftin: 60 * IN, mm: 1500 }, body: box(360, 100, 760) },  // the Electrical add-on's 0.7 symbols (elec-sync.mjs, 0.7 closing fixes): IFC4 classes with the same nine attributes as above
+  'socket.data':         { ifc4: ['IFCOUTLET', 'DATAOUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'D', height: { ftin: 16 * IN, mm: 300 }, body: box(70, 12, 115) },
+  'socket.tel':          { ifc4: ['IFCOUTLET', 'TELEPHONEOUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'D', height: { ftin: 16 * IN, mm: 300 }, body: box(70, 12, 115) },
+  'socket.tv':           { ifc4: ['IFCOUTLET', 'AUDIOVISUALOUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'D', height: { ftin: 16 * IN, mm: 300 }, body: box(70, 12, 115) },
+  'switch.key':          { ifc4: ['IFCSWITCHINGDEVICE', 'SELECTORSWITCH'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'S', height: { ftin: 48 * IN, mm: 1100 }, body: box(70, 12, 115) },
+  'switch.timer':        { ifc4: ['IFCELECTRICTIMECONTROL', 'TIMECLOCK'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'S', height: { ftin: 48 * IN, mm: 1100 }, body: box(70, 15, 115) },
+  'thermostat':          { ifc4: ['IFCUNITARYCONTROLELEMENT', 'THERMOSTAT'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'T', height: { ftin: 54 * IN, mm: 1500 }, body: box(90, 25, 90) },
+  'luminaire.exit':      { ifc4: ['IFCLIGHTFIXTURE', 'SECURITYLIGHTING'], ifc2: 'IFCFLOWTERMINAL', mount: 'ceiling', prefix: 'L', body: box(350, 60, 200) },
+  'detector.smoke':      { ifc4: ['IFCSENSOR', 'SMOKESENSOR'], ifc2: 'IFCFLOWCONTROLLER', mount: 'ceiling', prefix: 'A', body: box(110, 110, 50) },
+  'detector.heat':       { ifc4: ['IFCSENSOR', 'HEATSENSOR'], ifc2: 'IFCFLOWCONTROLLER', mount: 'ceiling', prefix: 'A', body: box(110, 110, 50) },
+  'callpoint':           { ifc4: ['IFCALARM', 'MANUALPULLBOX'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'A', height: { ftin: 48 * IN, mm: 1400 }, body: box(90, 50, 90) },
+  'sounder':             { ifc4: ['IFCALARM', 'SIREN'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'A', height: { ftin: 84 * IN, mm: 2300 }, body: box(110, 80, 110) },
+  'fan':                 { ifc4: ['IFCFAN', 'PROPELLORAXIAL'], ifc2: 'IFCFLOWMOVINGDEVICE', mount: 'ceiling', prefix: 'V', body: box(250, 250, 120) },
+  'heater':              { ifc4: ['IFCOUTLET', 'POWEROUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'R', height: { ftin: 16 * IN, mm: 300 }, body: box(110, 18, 130) },
+  'cooker':              { ifc4: ['IFCOUTLET', 'POWEROUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'R', height: { ftin: 16 * IN, mm: 300 }, body: box(150, 25, 150) },
+  'evcharger':           { ifc4: ['IFCOUTLET', 'POWEROUTLET'], ifc2: 'IFCFLOWTERMINAL', mount: 'wall', prefix: 'R', height: { ftin: 42 * IN, mm: 1100 }, body: box(250, 120, 350) },
+  'meter':               { ifc4: ['IFCFLOWMETER', 'ENERGYMETER'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'E', height: { ftin: 60 * IN, mm: 1500 }, body: box(180, 100, 300) },
+  'board.sub':           { ifc4: ['IFCELECTRICDISTRIBUTIONBOARD', 'DISTRIBUTIONBOARD'], ifc2: 'IFCFLOWCONTROLLER', mount: 'wall', prefix: 'P', height: { ftin: 60 * IN, mm: 1500 }, body: box(300, 100, 500) },
 };
 export const KINDS = Object.keys(DEVICES);
 const CLASSES = [...new Set(Object.values(DEVICES).flatMap((d) => [d.ifc4[0], d.ifc2]))];
 export const isLight = (kind) => /^(luminaire|downlight)/.test(kind);
 export const isSwitch = (kind) => /^(switch|pushbutton|sensor)/.test(kind);
+/** A panel (the main board or a sub-board): never on a circuit of its own in the schedules. */
+export const isBoard = (kind) => /^board/.test(kind);
 /** Volts for the circuit schedule's amps: 120 / 240 in a feet-and-inches model, 230 / 400 in a metric one. */
-export const voltsOf = (kind, units) => (kind === 'socket.3ph' ? (units === 'mm' ? 400 : 240) : (units === 'mm' ? 230 : 120));
+export const voltsOf = (kind, units) => (kind === 'socket.3ph' ? (isMetric(units) ? 400 : 240) : /^(cooker|heater|evcharger)$/.test(kind) ? (isMetric(units) ? 230 : 240) : (isMetric(units) ? 230 : 120));
 export function defaultHeight(kind, units, ceiling) {
   const d = DEVICES[kind];
   if (!d) return 0;
-  return d.mount === 'ceiling' ? ceiling : d.height[units === 'mm' ? 'mm' : 'ftin'];
+  return d.mount === 'ceiling' ? ceiling : d.height[isMetric(units) ? 'mm' : 'ftin'];
 }
 /** Plan mm per paper mm for the symbols: drawn for a 1:50 plan (1/4" = 1'-0" in feet and inches). */
-export const symbolScale = (units) => (units === 'mm' ? 50 : 48);
+export const symbolScale = (units) => (isMetric(units) ? 50 : 48);
 
 /** A symbol in the plan: rotated (angle in radians; the symbol's +y points along it), scaled, moved to `at`. */
 export function symbolPlan(kind, at, angle, scale) {
@@ -161,8 +181,8 @@ function writeDevice(w, d, walls) {
   w.movePlacement(l.ObjectPlacement.value, at[0], at[1], 0, deg);
   const b = D.body;
   const solid = D.mount === 'wall' ? w.box(-b.w / 2, 0, d.height - b.h / 2, b.w / 2, b.d, d.height + b.h / 2) : w.box(-b.w / 2, -b.d / 2, d.height - b.h, b.w / 2, b.d / 2, d.height);
-  const color = d.kind === 'board' ? [0.55, 0.57, 0.6] : isLight(d.kind) ? [0.98, 0.95, 0.75] : [0.95, 0.95, 0.93];
-  w.styleItem(solid, w.surfaceStyle(tr(d.kind === 'board' ? 'res.style.panel' : 'res.style.device'), color, 0));
+  const color = isBoard(d.kind) ? [0.55, 0.57, 0.6] : isLight(d.kind) ? [0.98, 0.95, 0.75] : [0.95, 0.95, 0.93];
+  w.styleItem(solid, w.surfaceStyle(tr(isBoard(d.kind) ? 'res.style.panel' : 'res.style.device'), color, 0));
   w.setShape(d.id, [w.rep('body', 'Body', 'SweptSolid', [solid])]);
   w.upsertPset(d.id, ELEC_PSET, [['X', 'IFCLENGTHMEASURE', round(w.u(at[0]))], ['Y', 'IFCLENGTHMEASURE', round(w.u(at[1]))], ['Angle', 'IFCREAL', round((ang * 180) / Math.PI, 4)]]);
   return { at, angle: ang };
@@ -267,7 +287,7 @@ export function deviceSchedule(devs, levels, { fmtLen = (mm) => String(Math.roun
 export function circuitSchedule(devs, { units = 'ftin', t = tr } = {}) {
   const map = new Map();
   for (const d of devs) {
-    if (d.kind === 'board') continue;
+    if (isBoard(d.kind)) continue;
     const c = d.circuit || '';
     if (!map.has(c)) map.set(c, { circuit: c, n: 0, watts: 0, volts: 0, kinds: new Map() });
     const r = map.get(c);

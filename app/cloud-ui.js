@@ -17,6 +17,7 @@
  * (the cloud in the model's projected system); "Centered on the model" — the cloud's middle on the model's middle, its
  * bottom on the model's bottom. On open: map when the model has a map conversion and the cloud names a system, else model
  * coordinates when they put the cloud near the model, else centered (said). Alone, a cloud sits round the origin.
+ * The placement is worked out when it is chosen and then kept: drawing or editing the model never moves the cloud.
  * The bar (`[data-cloudbar]`): colour by, point size, points to show (re-reads the file), units when the file does not
  * say, placement, the slice (off / top / front / side, where, how thick — the as-built cut to trace from), Trace in CadCraft
  * (hands the file over; CadCraft attaches it under the drawing), hide, remove. Its choices persist in localStorage
@@ -28,6 +29,7 @@ import { CloudLayer, M4 } from './pointcloud-three.js';
 import { readGeoref } from './ifc-geo.js';
 import { el } from './ui-util.js';
 import { t } from './i18n.js';
+import { getDisplayUnits, lenMark, parseLen } from './model-units.js';   // GH.3-A: the slice's lengths follow the display unit
 
 const BUDGETS = [1e6, 2e6, 5e6, 10e6];
 const SLICE_N = { top: [0, 1, 0], front: [0, 0, 1], side: [1, 0, 0] };   // viewer space (Y up)
@@ -46,7 +48,8 @@ export function installClouds(host) {
 
   let layer = null, cloud = null, file = null, info = null, place = 'own', unit = null, slice = null, notes = [];
   let abort = null;
-  let adjustM = null;   // DF.22 (bim-draw): an extra viewer-space 4 × 4 after the placement (pc.adjust)
+  let adjustM = null;   // DF.22 (bim-draw): the alignment (pc.adjust), kept in the placement's own frame: placed = placeM · adjustM
+  let placeM = null;    // the placement, worked out when it is chosen (open, Place, Units, another model) and then kept
   const bar = buildBar();
   const secBar = host.root.querySelector('[data-sectionbar]'), toolbar = host.root.querySelector('[data-toolbar]');
   secBar.after(bar.el);
@@ -118,6 +121,7 @@ export function installClouds(host) {
     layer.setColors(colorize(c, pref.color));
     v.extraBoxes = [() => layer?.box()];
     place = autoPlace();
+    settle();
     applyPlace(true);
     slice = null;
     layer.setSlice(null);
@@ -125,7 +129,37 @@ export function installClouds(host) {
     bar.el.hidden = false;
     host.cloudShown?.(true);
     const s = cloudSummary(c);
+    offerReproject(true).catch(() => {});   // 0.8 D8.9 item 3: a cloud in another system than the model's is offered the model's
     host.status(t('pc.opened', { file: f.name, kept: s.kept.toLocaleString('en-US'), read: s.read.toLocaleString('en-US'), s: ((performance.now() - t0) / 1000).toFixed(1) }) + (notes.length ? ' ' + notes.join(' ') : ''), false, !notes.length);
+  }
+
+
+  // ---- 0.8 D8.9 item 3: reproject the loaded cloud into the model's system (the file on disk is never touched; opening it again gives its own system back) ----
+  async function offerReproject(auto) {
+    if (!cloud || !file) return;
+    const ent = first();
+    if (!ent) { if (!auto) host.status(t('georef.file.nomodel'), true); return; }
+    const [P, GU, GC, C] = await Promise.all([import('./crs-pick.js'), import('./georef-ui.js'), import('./georef-cloud.js'), import('./crs.js')]);
+    if (!C.catalogLoaded()) await C.loadCatalog();
+    const g = geo(ent), ms = g ? P.modelSystem(g.crs) : null, modelCrs = ms ? ms.crs : null;
+    if (auto && (!modelCrs || !info.crs || P.sameCoordinates(info.crs, modelCrs))) return;
+    const f = file, mine = cloud;
+    const d = await GU.decideFile({ file: f, fileCrs: info.crs, modelCrs, box: [mine.min[0], mine.min[1], mine.max[0], mine.max[1]], say: (...a) => host.status(...a) });
+    if (cloud !== mine) return;
+    if (d?.from && !info.crs) { info.crs = d.from; info.code = d.from.code; }
+    if (!d || d.action !== 'reproject') { if (d?.problems?.length) GU.sendProblems(d.problems); return; }
+    const r = await GU.runReproject({ xy: GC.cloudXY(mine), from: d.from, to: modelCrs, file: f, say: (...a) => host.status(...a) });
+    if (!r || cloud !== mine) return;
+    if (r.refused) { GU.sendProblems(r.problems); host.status(r.problems[0].text, true); return; }
+    const per = (u) => UNIT_M[u] || 1;
+    const zFactor = per(mine.zUnit || mine.unit) / per(modelCrs.unit);
+    const was = mine.n, { dropped } = GC.applyCloud(mine, r.xy, { unit: modelCrs.unit, zFactor });
+    info.crs = modelCrs; info.code = modelCrs.code; unit = mine.unit;
+    layer.set(mine, M4.I());
+    layer.setColors(colorize(mine, pref.color));
+    place = autoPlace(); settle(); applyPlace(true); fillBar();
+    GU.sendProblems([...d.problems, ...r.problems]);
+    host.status(t('georef.file.done', { n: (was - dropped).toLocaleString('en-US'), file: f.name, from: d.from.name, to: modelCrs.name }) + ' ' + t('georef.file.reopen'), false, true);
   }
 
   // ---- placement ----
@@ -164,7 +198,7 @@ export function installClouds(host) {
     const c = [(mb.min[0] + mb.max[0]) / 2, mb.min[1], (mb.min[2] + mb.max[2]) / 2];
     return M4.mul(M4.mul(M4.T(...c), M4.YUP), M4.mul(M4.T(...centreBottom().map((x) => -x)), base()));
   }
-  const geoCache = new WeakMap();
+  let geoCache = new WeakMap();
   function geo(ent) {
     if (!geoCache.has(ent)) { let g = null; try { g = readGeoref(ent.ifc.api, ent.model.modelID); } catch (e) { g = null; } geoCache.set(ent, g); }
     return geoCache.get(ent);
@@ -182,15 +216,21 @@ export function installClouds(host) {
     if (!ent) return 'own';
     const g = geo(ent);
     if (g?.kind === 'map' && info.crs && near('map')) {
-      if (g.crs.code && info.code && g.crs.code !== info.code) notes.push(t('pc.place.crs_differ', { cloud: 'EPSG:' + info.code, model: 'EPSG:' + g.crs.code }));
+      const modelCode = Number(g.crs.record?.Code) || g.crs.code;   // 0.8 D8.9: the system the person chose for the model counts first
+      if (modelCode && info.code && modelCode !== info.code) notes.push(t('pc.place.crs_differ', { cloud: 'EPSG:' + info.code, model: 'EPSG:' + modelCode }));
       return 'map';
     }
     if (near('model')) return 'model';
     notes.push(t('pc.place.centered'));
     return 'center';
   }
-  /** The placement, then pc.adjust's matrix. */
-  const placed = () => { const m = matrixFor(place) || matrixFor('center'); return adjustM ? M4.mul(adjustM, m) : m; };
+  /** Work the placement out now and keep it: walls drawn later change the model's box ("Centered on the model"), and an
+   *  alignment (pc.adjust) is made against the cloud where it is — so the cloud stays put while the model changes. */
+  function settle() { placeM = matrixFor(place) || matrixFor('center'); }
+  /** The placement with the alignment inside it (pc.adjust). The alignment is kept in the cloud's own frame, not the scene's:
+   *  when the cloud is placed again (another model, Place, Units, a re-read) it moves with the cloud. Kept in the scene, a turn
+   *  made about the cloud's walls would be made about a point the cloud has left, and swing it away (0.6.1 FIX-061-SQUARE). */
+  const placed = () => { if (!placeM) settle(); return adjustM ? M4.mul(placeM, adjustM) : placeM; };
   function applyPlace(fit = false) {
     layer.setMatrix(placed());
     const v = host.viewer();
@@ -220,7 +260,7 @@ export function installClouds(host) {
     applySlice();
     fillBar();
     if (axis === 'top') host.viewer().view('top');
-    host.status(t('pc.slice.on', { thick: fmt(pref.thick) }), false, true);
+    host.status(t('pc.slice.on.u', { thick: fmt(pref.thick) }), false, true);
   }
 
   // ---- picking (Measure) ----
@@ -238,11 +278,11 @@ export function installClouds(host) {
     if (!cloud || !info.crs) return null;
     const crs = await import('./crs.js');
     if (!crs.catalogLoaded()) await crs.loadCatalog();
-    const entry = info.code ? crs.byCode(info.code) : null;
-    if (!entry || entry.geographic) return null;
+    const entry = info.code ? crs.byCode(info.code) : info.crs;   // 0.8 D8.9: a system the person said (or reprojected into) may be their own
+    if (!entry || entry.geographic || entry.unit === 'deg') return null;
     const q = toCloud(p);
     const [lon, lat] = crs.transformer(entry, null)(q[0], q[1]);
-    return { lon, lat, e: q[0], n: q[1], h: q[2], crs: entry.name, code: entry.code };
+    return { lon, lat, e: q[0], n: q[1], h: q[2], crs: entry.name, code: entry.code, per: crs.METRES_PER[entry.unit] || 1 };   // per: metres in the cloud's unit (GH.3-A: shown in the display unit)
   }
 
   // ---- the bar ----
@@ -256,11 +296,12 @@ export function installClouds(host) {
       sel('data-cloud-budget', t('pc.bar.budget')),
       sel('data-cloud-units', t('pc.bar.units')),
       sel('data-cloud-place', t('pc.bar.place')),
+      el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-cloud-system': '', title: t('georef.cloud.title') }, t('georef.cloud.button')),   // 0.8 D8.9 item 3
       el('span', { className: 'bc-sub' }, t('pc.bar.slice')),
       ...['off', 'top', 'front', 'side'].map((a) => el('button', { type: 'button', className: 'bc-tool', 'data-cloud-slice': a, 'aria-pressed': 'false', title: t('pc.slice.' + a + '.title') }, el('span', {}, t('pc.slice.' + a)))),
       el('span', { className: 'bc-cloud-slicectl', 'data-cloud-slicectl': '', hidden: true },
         el('label', {}, t('pc.slice.at'), ' ', el('input', { type: 'range', min: '0', max: '1', step: '0.0005', 'data-cloud-at': '' })),
-        el('label', {}, t('pc.slice.thick'), ' ', el('input', { type: 'text', className: 'bc-input bc-num', inputmode: 'decimal', 'data-cloud-thick': '' }), ' m'),   // i18n-ignore: metre symbol
+        el('label', {}, t('pc.slice.thick'), ' ', el('input', { type: 'text', className: 'bc-input bc-num', inputmode: 'decimal', 'data-cloud-thick': '' })),   // GH.3-A: the unit is in the box (the display unit)
         el('span', { className: 'bc-sub', 'data-cloud-atval': '' })),
       el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-cloud-trace': '', hidden: true }, t('pc.trace', { app: host.root.dataset.editApp || 'CadCraft' })),   // i18n-ignore: app name
       el('button', { type: 'button', className: 'btn-line btn-sm-cc', 'data-cloud-hide': '' }, t('pc.hide')),
@@ -268,20 +309,20 @@ export function installClouds(host) {
     const q = (s) => root.querySelector(s);
     const b = { el: root, name: q('[data-cloud-name]'), count: q('[data-cloud-count]'), color: q('[data-cloud-color]'), size: q('[data-cloud-size]'), budget: q('[data-cloud-budget]'),
       units: q('[data-cloud-units]'), place: q('[data-cloud-place]'), slicectl: q('[data-cloud-slicectl]'), at: q('[data-cloud-at]'), thick: q('[data-cloud-thick]'), atval: q('[data-cloud-atval]'),
-      trace: q('[data-cloud-trace]'), hide: q('[data-cloud-hide]'), remove: q('[data-cloud-remove]') };
+      system: q('[data-cloud-system]'), trace: q('[data-cloud-trace]'), hide: q('[data-cloud-hide]'), remove: q('[data-cloud-remove]') };
     b.color.addEventListener('change', () => { pref.color = b.color.value; save(); layer.setColors(colorize(cloud, pref.color)); });
     b.size.addEventListener('input', () => { pref.size = Number(b.size.value); save(); layer.setSize(pref.size); });
     b.budget.addEventListener('change', () => { pref.budget = Number(b.budget.value); save(); if (file) host.guard(() => open(file, true)); });
-    b.units.addEventListener('change', () => { unit = b.units.value; applyPlace(true); fillBar(); });
-    b.place.addEventListener('change', () => { place = b.place.value; applyPlace(); host.viewer().view('iso'); });
+    b.units.addEventListener('change', () => { unit = b.units.value; settle(); applyPlace(true); fillBar(); });
+    b.place.addEventListener('change', () => { place = b.place.value; settle(); applyPlace(); host.viewer().view('iso'); });
     root.addEventListener('click', (e) => {
       const s = e.target.closest('[data-cloud-slice]');
       if (s) setSlice(s.dataset.cloudSlice === 'off' ? null : s.dataset.cloudSlice);
     });
     b.at.addEventListener('input', () => { const [lo, hi] = sliceRange(slice.axis); slice.at = lo + (hi - lo) * Number(b.at.value); applySlice(); fillAt(); });
     b.thick.addEventListener('change', () => {
-      const v = Number(String(b.thick.value).replace(',', '.'));
-      if (!(v > 0 && v <= 5)) { host.status(t('pc.slice.thick.bad'), true); b.thick.value = fmt(pref.thick); return; }
+      const v = parseLen(String(b.thick.value).replace(',', '.'), getDisplayUnits()) / 1000;   // metres inside
+      if (!(v > 0 && v <= 5)) { host.status(t('pc.slice.thick.bad.u', { max: lenMark(5000, getDisplayUnits()) }), true); b.thick.value = fmt(pref.thick); return; }
       pref.thick = v; save(); applySlice(); fillAt();
     });
     b.trace.addEventListener('click', () => {
@@ -289,11 +330,13 @@ export function installClouds(host) {
         () => host.status(t('pc.traced', { file: file.name, app: host.root.dataset.editApp }), false, true),
         (err) => host.status(err?.code === 'blocked' ? t('handoff.blocked') : t('handoff.failed', { reason: err?.message || '' }), true));
     });
+    b.system.addEventListener('click', () => host.guard(() => offerReproject(false)));
     b.hide.addEventListener('click', () => { layer.setVisible(!layer.visible); host.viewer().relist(); b.hide.textContent = layer.visible ? t('pc.hide') : t('pc.show'); });
     b.remove.addEventListener('click', remove);
     return b;
   }
-  const fmt = (v) => String(Math.round(v * 1000) / 1000);
+  const fmt = (v) => lenMark(v * 1000, getDisplayUnits());   // metres in, the display unit out
+  window.addEventListener('bimcraft-units', () => { if (cloud) { bar.thick.value = fmt(pref.thick); fillAt(); } });
   function options(select, list, value) {
     select.replaceChildren(...list.map(([v, label]) => el('option', { value: String(v) }, label)));
     select.value = String(value);
@@ -323,12 +366,12 @@ export function installClouds(host) {
     if (!slice) return;
     const [lo, hi] = sliceRange(slice.axis);
     bar.at.value = String(hi > lo ? (slice.at - lo) / (hi - lo) : 0);
-    bar.atval.textContent = t('pc.slice.atval', { at: (slice.at - lo).toFixed(2), size: (hi - lo).toFixed(2) });
+    bar.atval.textContent = t('pc.slice.atval.u', { at: fmt(slice.at - lo), size: fmt(hi - lo) });
   }
   function remove() {
     abort?.abort();
     if (layer) layer.dispose();
-    cloud = null; file = null; info = null; slice = null; adjustM = null;
+    cloud = null; file = null; info = null; slice = null; adjustM = null; placeM = null;
     bar.el.hidden = true;
     const v = host.viewer();
     if (v) { v.extraBoxes = []; v.relist(); v.render(); }
@@ -339,16 +382,25 @@ export function installClouds(host) {
   return {
     open, snap, locate, remove,
     /** A model opened or closed: place the cloud again (the automatic choice). */
-    modelChanged() { if (!cloud) return; notes = []; place = autoPlace(); applyPlace(); fillBar(); },
+    modelChanged() { geoCache = new WeakMap(); if (!cloud) return; notes = []; place = autoPlace(); settle(); applyPlace(); fillBar(); },
     has: () => !!cloud,
     toggleBar() { if (cloud) bar.el.hidden = !bar.el.hidden; return cloud ? !bar.el.hidden : false; },
     barShown: () => !!cloud && !bar.el.hidden,
     state: () => cloud && { name: cloud.name, kept: cloud.n, read: cloud.read, place, unit, color: pref.color, size: pref.size, budget: pref.budget, slice: slice && { ...slice, thick: pref.thick }, notes: [...notes], visible: layer.visible, box: layer.box() && [layer.box().min.toArray(), layer.box().max.toArray()] },
     layer: () => layer,
-    /** DF.22: adjust(m) sets an extra viewer-space 4 × 4 (column-major, after the placement; null = none) and places the cloud
-     *  again; adjust() → the current one (identity when none). Kept across modelChanged() and a budget re-read. */
-    adjust(...a) { if (!a.length) return adjustM || M4.I(); adjustM = a[0] || null; if (cloud) applyPlace(); return adjustM || M4.I(); },
+    /** DF.22: adjust(m) sets an extra viewer-space 4 × 4 (column-major, applied after the placement as it is now; null = none)
+     *  and places the cloud again; adjust() → the current one in the viewer's space (identity when none). Stored in the cloud's
+     *  own frame (see placed), so it is kept across modelChanged(), Place, Units and a budget re-read and moves with the cloud. */
+    adjust(...a) {
+      const scene = () => (adjustM && placeM ? M4.mul(M4.mul(placeM, adjustM), M4.inv(placeM)) : M4.I());
+      if (!a.length) return scene();
+      if (cloud && !placeM) settle();
+      adjustM = a[0] && placeM ? M4.mul(M4.mul(M4.inv(placeM), a[0]), placeM) : null;
+      if (cloud) applyPlace();
+      return scene();
+    },
     card: () => card?.dataset.cloudCard || null,
     toCloud,
+    reproject: () => offerReproject(false),   // for tests: the same as the bar's button
   };
 }

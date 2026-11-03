@@ -26,6 +26,8 @@ import { t } from "./i18n.js";
 export const HOUSEKEEPING_DIR = /(_backup|_log)$|^revit_temp$|^\.|^__macosx$/i;
 const MODEL_EXT = new Set(['rvt', 'rfa', 'rte', 'rft']);
 const CAD_EXT = new Set(['dwg', 'dxf', 'dgn']);
+/** 0.7 BIM-BUNDLE-OPEN: a project bundle is known by its name (…ccbundle.zip or …ccbundle); a plain .zip stays among the other files. */
+export const isBundleName = (name) => /\.ccbundle(\.zip)?$/i.test(name);
 const LEFTOVER_EXT = new Set(['dwl', 'dwl2', 'bak', 'err', 'log', 'tmp', 'sv$', 'ac$', 'lck', 'slog']);
 const LIBRARY_TYPES = /keynote|assembly code/i;
 const BACKUP_RE = /^(.*)\.(\d{4})$/;
@@ -121,7 +123,7 @@ async function pool(items, n, fn) {
 }
 
 export async function scanFolder({ name, files, skipped = [] }, { onProgress = () => {}, concurrency = 3 } = {}) {
-  const live = [], housekeeping = new Map(), leftovers = [], cad = [], ifc = [], other = [];
+  const live = [], housekeeping = new Map(), leftovers = [], cad = [], ifc = [], bundles = [], other = [];
   for (const d of skipped) housekeeping.set(d, housekeeping.get(d) || 0);
   for (const f of files) {
     if (isHousekeepingPath(f.path)) {
@@ -133,6 +135,7 @@ export async function scanFolder({ name, files, skipped = [] }, { onProgress = (
     live.push(f);
     const ext = extOf(f.path);
     if (LEFTOVER_EXT.has(ext)) leftovers.push(f);
+    else if (isBundleName(f.path)) bundles.push(f);
     else if (CAD_EXT.has(ext)) cad.push(f);
     else if (ext === 'ifc') ifc.push(f);
     else if (!MODEL_EXT.has(ext)) other.push(f);
@@ -201,6 +204,7 @@ export async function scanFolder({ name, files, skipped = [] }, { onProgress = (
     links,
     cad: cad.map((f) => ({ ...f, usedBy: [...(usedBy.get(f.path.toLowerCase()) || [])] })).sort((a, b) => a.path.localeCompare(b.path)),
     ifc: ifc.sort((a, b) => a.path.localeCompare(b.path)),
+    bundles: bundles.sort((a, b) => a.path.localeCompare(b.path)),   // 0.7 BIM-BUNDLE-OPEN
     housekeeping: [...housekeeping.entries()].map(([path, count]) => ({ path, count })).sort((a, b) => a.path.localeCompare(b.path)),
     leftovers,
     other,

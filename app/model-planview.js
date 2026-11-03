@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+import { layerPrimitives } from './wall-plan-graphics.js';
+import { dimensionFootprint } from './dimension-geometry.js';
 /**
  * model-planview.js — the plan view of one level (0.5 part 3, BM.2): a 2D canvas beside the 3D view, where the building
  * tools draw. Plan millimetres, x right, y up (model-plan.js builds what it shows). Colours from the page's tokens, so
@@ -9,7 +11,12 @@
  *   pv.markers = [{ p, kind: 'origin' | 'survey' | 'both', label }]   the project origin / survey point (0.6 DF.15; not printed)
  *   scene.grids = [{ tag, a, b, bubbles: 'both' | 'start' | 'end' | 'none', sel }]   grid lines with their bubbles (0.6 DF.16)
  *   scene.cloud = { xy, n }   a point cloud's slice as dots (0.6 DF.22); snap kind 'cloud' = a diamond
+ *   scene.through = [{ key, guid, from, poly, pieces }]  walls of other levels that run up through this level's cut (0.7 BIM-MLWALL): lighter, never picked
+ *   scene.pictures = [{ img (ImageBitmap), m (picture.js matrix), opacity, w, h, corners, selected, locked }]  pictures as backgrounds, the first thing drawn (0.8 D8.8, picture-ui.js)
  *   scene.underlay = { segs }  another level drawn light under everything, never picked (0.6 DC.117)
+ *   scene.walls[].phase: 'existing' | 'demolish' | 'new' (0.8 EG.59, phases-ui.js): drawn in PHASE_PLAN's pen
+ *   scene.walls[].pen / scene.symbols[].lw: a view's pen override (0.8 SU.1055, pens.js): { w, dash: solid|dash|dot, color: token }
+ *   scene.trace = { segs }  a Trace Reference: another level, dashed in the action colour, never picked or printed (0.8 SU.1055)
  *   scene.crop = [x0, y0, x1, y1]  the view's crop region: outside it the plan is veiled (still editable), a dashed frame round it
  *   scene.drafting = [{ key, kind 'lines' | 'hatch', lines: [[[x, y]…]], closed, rings, solid, segs }]  drafting drawn in this view
  *                  (0.6 DC.117 (d), drafting.js draftingItem): over the building, picked first
@@ -25,6 +32,8 @@
  * Pointer: wheel zooms about the pointer; middle or right drag, or Space + drag, pans; two fingers pinch and pan; a left
  * click (≤ 4 px of movement) goes to the handlers with the plan point; a left drag with no tool pans.
  */
+import { PHASE_PLAN } from './phase-pens.js';   // 0.8 EG.59: the plan's phase pens
+import { PadDetector } from './wheel-pad.js';   // 0.8 D7.56 (CadCraft's copy, byte-identical): a trackpad's two-finger swipe pans
 import { panButton, wheelFactor } from './input-mouse.js';   // 0.5 IP.1: buttons and wheel from the input profile
 const TOKENS = ['--ink', '--ink-2', '--line', '--grid', '--grid-minor', '--sheet', '--sheet-2', '--action', '--poche', '--layer-blue', '--layer-red', '--layer-ochre',
   '--layer-green', '--layer-orange', '--layer-magenta', '--layer-violet', '--layer-cyan'];   // 0.6 DF.29: pipe and duct systems' colours
@@ -48,6 +57,14 @@ export class PlanView {
     this.ro.observe(canvas.parentElement);
     this.bind();
     this.resize();
+    // 0.8 Track ID: hand the view to the input-device layer (assets/js/app-devices-ui.js) — 2D: pan as a drag does (cx/cy by
+    // px / scale), zoom = zoomAt (note: point first, factor last), fit = fit()
+    (window.ccViews ||= []).push({
+      el: canvas, kind: '2d',
+      pan: (dx, dy) => { this.userMoved = true; this.cx -= dx / this.scale; this.cy += dy / this.scale; this.render(); },
+      zoom: (f, x = this.w / 2, y = this.h2 / 2) => { if (f > 0) this.zoomAt(x, y, f); },
+      fit: () => this.fit(),
+    });
   }
 
   resize() {
@@ -65,7 +82,7 @@ export class PlanView {
   fromCanvas(px, py) { return [(px - this.w / 2) / this.scale + this.cx, (this.h2 / 2 - py) / this.scale + this.cy]; }
   pxToMm(px) { return px / this.scale; }
 
-  setScene(s) { this.scene = { walls: [], symbols: [], cut: [], below: [], above: [], rooms: [], dims: [], grids: [], ...s }; this.render(); }
+  setScene(s) { this.scene = { walls: [], through: [], symbols: [], cut: [], below: [], above: [], rooms: [], dims: [], grids: [], ...s }; this.render(); }
   setOverlay(o) { this.overlay = o; this.render(); }
   setSelection(keys) { this.selection = new Set(keys || []); this.render(); }
 
@@ -78,22 +95,34 @@ export class PlanView {
     for (const s of this.scene.symbols) { if (s.box) { g(s.box[0], s.box[1]); g(s.box[2], s.box[3]); } for (const q of s.poly || []) g(q[0], q[1]); }
     for (const x of this.scene.grids || []) { g(x.a[0], x.a[1]); g(x.b[0], x.b[1]); }
     for (const d of this.scene.drafting || []) for (const l of d.lines || []) for (const q of l) g(q[0], q[1]);   // 0.6 DC.117 (d)
+    for (const d of this.scene.dims || []) if (d.key) for (const q of dimensionFootprint(d)) g(q[0], q[1]);
     return Number.isFinite(bb.x0) ? bb : null;
   }
   /** Fit the drawing (or a 12 m square round the origin when there is nothing yet). Room is left for the bars on top. */
   fit(bb = this.bounds()) {
     if (!this.w) return;
     const b = bb || { x0: -2000, y0: -2000, x1: 10000, y1: 10000 };
-    const top = this.padTop ?? 0, bottom = this.padBottom ?? 0;
+    const top = this.padTop ?? 0, bottom = this.padBottom ?? 0, left = this.padLeft ?? 0;   // padLeft: a narrow bar over the plan's left (0.7 SU.751)
     const w = Math.max(1000, b.x1 - b.x0), h = Math.max(1000, b.y1 - b.y0);
-    this.scale = Math.min((this.w - 60) / w, (this.h2 - 60 - top - bottom) / h);
+    this.scale = Math.min((this.w - 60 - left) / w, (this.h2 - 60 - top - bottom) / h);
     if (!(this.scale > 0)) this.scale = 0.05;
-    this.cx = (b.x0 + b.x1) / 2;
+    this.cx = (b.x0 + b.x1) / 2 - left / 2 / this.scale;
     this.cy = (b.y0 + b.y1) / 2 + (top - bottom) / 2 / this.scale;
-    this.fitted = true;
+    this.fitted = true; this.userMoved = false;
     this.render();
   }
+  /** 0.7 SU.751: is anything of the plan outside the part showing (under the bars at the top counts as outside)? Only for a view the person has not moved. */
+  outsideView(margin = 16) {
+    const bb = this.bounds();
+    if (!bb || !this.w) return false;
+    const a = this.toScreen([bb.x0, bb.y0]), b = this.toScreen([bb.x1, bb.y1]);
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    const bar = this.barBoxFn ? this.barBoxFn() : this.barBox;   // the Draw bar floats over the plan's top left: content under it counts as outside
+    const under = bar && x0 < bar.w && y0 < bar.h;
+    return x0 < margin || y0 < margin + (this.padTop || 0) - 12 || x1 > this.w - margin || y1 > this.h2 - margin || !!under;
+  }
   zoomAt(px, py, k) {
+    this.userMoved = true;
     const before = this.fromCanvas(px, py);
     this.scale = Math.min(20, Math.max(0.0005, this.scale * k));
     const after = this.fromCanvas(px, py);
@@ -104,8 +133,10 @@ export class PlanView {
   // ---- pointer ----
   bind() {
     const c = this.canvas;
+    const pad = new PadDetector();
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
+      if (pad.isSwipe(e)) { this.userMoved = true; this.cx += e.deltaX / this.scale; this.cy -= e.deltaY / this.scale; this.render(); return; }   // D7.56: two fingers pan, a pinch and a mouse wheel zoom
       const r = c.getBoundingClientRect();
       this.zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015) * (e.ctrlKey ? 1 : wheelFactor())));
     }, { passive: false });
@@ -128,7 +159,7 @@ export class PlanView {
       if (p) {
         const moved = Math.hypot(e.clientX - p.x, e.clientY - p.y);
         if ((p.pan || (p.touch && this.dragPan)) && moved > 3) {
-          p.panning = true; this._panned = true;
+          p.panning = true; this._panned = true; this.userMoved = true;
           this.cx = p.cx - (e.clientX - p.x) / this.scale; this.cy = p.cy + (e.clientY - p.y) / this.scale;
           this.render();
           return;
@@ -167,7 +198,7 @@ export class PlanView {
     this.scale = Math.min(20, Math.max(0.0005, s.scale * d / s.d));
     const Q = this.fromCanvas(m.x - r.left, m.y - r.top);
     this.cx += P[0] - Q[0]; this.cy += P[1] - Q[1];
-    this._panned = true;
+    this._panned = true; this.userMoved = true;
     this.render();
   }
 
@@ -184,6 +215,13 @@ export class PlanView {
       if (s.poly) { if (inPoly(x, y, s.poly) || near(x, y, s.poly, tol)) return s.key; continue; }
       const b = s.box;
       if (b && x >= Math.min(b[0], b[2]) - tol && x <= Math.max(b[0], b[2]) + tol && y >= Math.min(b[1], b[3]) - tol && y <= Math.max(b[1], b[3]) + tol) return s.key;
+    }
+    // 0.7 SU.751: dimension lines come after doors and windows (zoomed out, a wall's own dimension line lay within reach of the door in it and took the click)
+    for (const d of this.scene.dims || []) {
+      if (!d.key) continue;
+      const L = Math.hypot(d.b[0]-d.a[0],d.b[1]-d.a[1]); if (L < 0.001) continue;
+      const n = [-(d.b[1]-d.a[1])/L,(d.b[0]-d.a[0])/L], off = d.off || 0;
+      if (segD(x,y,d.a[0]+n[0]*off,d.a[1]+n[1]*off,d.b[0]+n[0]*off,d.b[1]+n[1]*off)<=tol) return d.key;
     }
     for (const w of this.scene.walls) if ((w.pieces || [w.poly]).some((p) => inPoly(x, y, p))) return w.key;
     for (const w of this.scene.walls) if (w.poly && near(x, y, w.poly, tol)) return w.key;
@@ -218,8 +256,24 @@ export class PlanView {
     const flat = (l) => { g.beginPath(); for (let i = 0; i < l.length; i += 2) { const s = S([l[i], l[i + 1]]); if (i) g.lineTo(s.x, s.y); else g.moveTo(s.x, s.y); } g.closePath(); };
     const segs = (a) => { g.beginPath(); for (let i = 0; i < a.length; i += 4) { const p = S([a[i], a[i + 1]]), q = S([a[i + 2], a[i + 3]]); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); } g.stroke(); };
     const sel = (k) => this.selection.has(k), hov = (k) => this.hover === k;
+    // 0.8 D8.8: pictures placed as backgrounds (picture.js matrix: picture pixels -> plan mm), under everything else; the one being worked on gets an outline
+    for (const pic of this.scene.pictures || []) {
+      const m = pic.m, sc = this.scale;
+      g.save();
+      g.globalAlpha = pic.opacity;
+      g.transform(sc * m[0], -sc * m[1], sc * m[2], -sc * m[3], sc * (m[4] - this.cx) + this.w / 2, this.h2 / 2 - sc * (m[5] - this.cy));
+      g.drawImage(pic.img, 0, 0, pic.w, pic.h);
+      g.restore();
+      if (pic.corners && pic.selected) {
+        g.save(); g.strokeStyle = action; g.lineWidth = 1.5; g.setLineDash(pic.locked ? [2, 3] : []); g.beginPath();
+        pic.corners.forEach((c, i) => { const s = S(c); if (i) g.lineTo(s.x, s.y); else g.moveTo(s.x, s.y); });
+        g.closePath(); g.stroke(); g.restore();
+      }
+    }
     // 0.6 DC.117: an underlay (another level), very light, under everything
     if (this.scene.underlay?.segs?.length) { g.lineWidth = 1; g.strokeStyle = ink2; g.globalAlpha = 0.3; segs(this.scene.underlay.segs); g.globalAlpha = 1; }
+    // 0.8 SU.1055: a Trace Reference (another level, moved and turned): ghosted in the action colour, reference only
+    if (this.scene.trace?.segs?.length) { g.lineWidth = 1; g.strokeStyle = action; g.globalAlpha = 0.35; g.setLineDash([6, 4]); segs(this.scene.trace.segs); g.setLineDash([]); g.globalAlpha = 1; }
     // what lies below the cut: thin
     g.lineWidth = 1; g.strokeStyle = ink2; g.globalAlpha = 0.7;
     for (const b of this.scene.below) { g.strokeStyle = sel(b.key) ? action : ink2; segs(b.segs); }
@@ -241,12 +295,26 @@ export class PlanView {
       g.globalAlpha = 1;
       g.strokeStyle = sel(c.key) || hov(c.key) ? action : ink; g.lineWidth = 1.5; segs(c.segs);
     }
+    // 0.7 BIM-MLWALL: walls of other levels that run up through this one: lighter, never picked (edited on their own level)
+    for (const w of this.scene.through || []) {
+      g.globalAlpha = 0.55;
+      for (const p of w.pieces || []) { path(p); g.fillStyle = poche; g.fill(); }
+      g.globalAlpha = 1; g.strokeStyle = ink2; g.lineWidth = 1.25;
+      for (const p of w.pieces || []) { path(p); g.stroke(); }
+    }
     // drawn walls: poché, and a heavy outline round all of them together (wallEdges: their joins not drawn); a picked or
     // pointed-at wall gets its own outline on top
     const joint = !!this.scene.wallEdges;
     for (const w of this.scene.walls) {
+      if (w.layers) {
+        for (const it of layerPrimitives(w)) {
+          if (it.t === 'fill') { g.fillStyle = it.color; for (const p of it.polys) { path(p); g.fill(); } }
+          else { g.beginPath(); it.pts.forEach((p, i) => { const q = S(p); if (i) g.lineTo(q.x, q.y); else g.moveTo(q.x, q.y); }); g.strokeStyle = it.color; g.lineWidth = it.w * 5; g.setLineDash(it.dash ? it.dash.map(v => v * 3) : []); g.stroke(); }
+        }
+        g.setLineDash([]);
+      }
       for (const p of w.pieces || [w.poly]) {
-        path(p); g.fillStyle = sel(w.key) ? action : poche; g.globalAlpha = sel(w.key) ? 0.45 : 1; g.fill(); g.globalAlpha = 1;
+        path(p); if (!w.layers) { g.fillStyle = sel(w.key) ? action : poche; g.globalAlpha = sel(w.key) ? 0.45 : 1; g.fill(); g.globalAlpha = 1; }
         if (!joint) { g.strokeStyle = sel(w.key) || hov(w.key) ? action : ink; g.lineWidth = sel(w.key) ? 2.5 : 1.75; g.stroke(); }
       }
     }
@@ -255,12 +323,30 @@ export class PlanView {
       for (const p of this.scene.wallEdges) { path(p); g.stroke(); }
       for (const w of this.scene.walls) if (sel(w.key) || hov(w.key)) for (const p of w.pieces || [w.poly]) { path(p); g.strokeStyle = action; g.lineWidth = sel(w.key) ? 2.5 : 1.75; g.stroke(); }
     }
+    // 0.8 EG.59: a wall's renovation phase on the plan: existing light grey, to demolish red dashed over a sheet-coloured gap, new heavy ink (phases.js PHASE_STYLE)
+    for (const w of this.scene.walls) {
+      const ph = w.phase && PHASE_PLAN[w.phase];
+      if (!ph) continue;
+      for (const p of w.pieces || [w.poly]) {
+        path(p);
+        if (ph.gap) { g.strokeStyle = C['--sheet'] || '#fff'; g.lineWidth = 3.5; g.setLineDash([]); g.stroke(); }
+        g.strokeStyle = C[ph.token] || ink; g.lineWidth = ph.w; g.setLineDash(ph.dash || []); g.stroke();
+      }
+      g.setLineDash([]);
+    }
+    // 0.8 SU.1055: a view's pen override on a wall (weight, dash, colour token): its outline again in that pen, over the common one
+    for (const w of this.scene.walls) {
+      if (!w.pen) continue;
+      g.strokeStyle = (w.pen.color && C[w.pen.color]) || ink; g.lineWidth = w.pen.w || 1.75; g.setLineDash(w.pen.dash === 'dash' ? [8, 4] : w.pen.dash === 'dot' ? [2, 3] : []);
+      for (const p of w.pieces || [w.poly]) { path(p); g.stroke(); }
+      g.setLineDash([]);
+    }
     // doors and windows
     for (const s of this.scene.symbols) this.drawSymbol(g, s, sel(s.key) || hov(s.key) ? action : (s.color && C[s.color]) || ink, S);   // s.color: a token name (0.6 DF.29)
     this.drawDrafting(g, C, S, sel, hov);   // 0.6 DC.117 (d)
     // dimensions
     g.font = '600 11px system-ui, sans-serif';
-    for (const d of this.scene.dims || []) this.drawDim(g, d, ink2, S);
+    for (const d of this.scene.dims || []) this.drawDim(g, d, d.key && (this.selection.has(d.key) || this.hover === d.key) ? action : ink2, S);
     // room labels on top
     g.textAlign = 'center'; g.textBaseline = 'middle';
     for (const r of this.scene.rooms || []) {
@@ -369,7 +455,8 @@ export class PlanView {
     g.globalAlpha = 1;
   }
   drawSymbol(g, s, color, S) {
-    g.strokeStyle = color; g.lineWidth = 1.25;
+    g.strokeStyle = color; g.lineWidth = s.lw || 1.25;   // lw: a family symbol's pen (0.7 BIM-FAM-MORE)
+    if (s.solid?.length) { g.fillStyle = color; for (const p of s.solid) { g.beginPath(); p.forEach((q, i) => { const t = S(q); if (i) g.lineTo(t.x, t.y); else g.moveTo(t.x, t.y); }); g.closePath(); g.fill(); } }
     g.beginPath();
     for (const l of s.lines || []) { const p = S([l[0], l[1]]), q = S([l[2], l[3]]); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); }
     g.stroke();
@@ -389,6 +476,13 @@ export class PlanView {
       for (const l of s.dashed) { const p = S([l[0], l[1]]), q = S([l[2], l[3]]); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); }
       g.stroke(); g.setLineDash([]);
     }
+    if (s.texts?.length) {   // a family symbol's text: its height in mm, never under 7 px, turned with the element
+      g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
+      for (const tx of s.texts) {
+        const p = S(tx.p), px = Math.max(7, tx.h * this.scale);
+        g.save(); g.translate(p.x, p.y); g.rotate(-(tx.rot || 0) * Math.PI / 180); g.font = `${px}px system-ui, sans-serif`; g.fillText(tx.text, 0, 0); g.restore();   // i18n-ignore: a CSS font
+      }
+    }
   }
   /** A dimension: a and b (plan), measured along ab, drawn `off` mm to its left, with ticks and the text. */
   drawDim(g, d, color, S) {
@@ -396,7 +490,7 @@ export class PlanView {
     if (L < 1) return;
     const u = [(d.b[0] - d.a[0]) / L, (d.b[1] - d.a[1]) / L], n = [-u[1], u[0]], off = d.offPx !== undefined ? d.offPx / this.scale : d.off || 0;
     const A = [d.a[0] + n[0] * off, d.a[1] + n[1] * off], B = [d.b[0] + n[0] * off, d.b[1] + n[1] * off];
-    const a = S(A), b = S(B), ea = S(d.a), eb = S(d.b);
+    const a = S(A), b = S(B), ea = S(d.witnesses?.[0] || d.a), eb = S(d.witnesses?.[1] || d.b);
     if (Math.hypot(b.x - a.x, b.y - a.y) < 18) return;
     g.strokeStyle = color; g.fillStyle = color; g.lineWidth = 0.75;
     g.beginPath();

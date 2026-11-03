@@ -6,37 +6,56 @@
  *   fmtLen(3810, 'ftin')          → 12'-6"         (to 1/16"; fmtLen(-12.7, 'ftin') → -1/2")
  *   fmtLen(3810, 'mm')            → 3810
  *   parseLen("12'6\"", 'ftin')    → 3810           a bare number is inches in 'ftin', millimetres in 'mm';
- *   parseLen('3.81 m', 'ftin')    → 3810           any unit can be typed (mm, cm, m, in, ft, ' and ")
+ *   parseLen('3.81 m', 'ftin')    → 3810           any unit can be typed (mm, cm, m, in, ft, ' and ", and since 0.7
+ *                                                  UNITS every length mark of the shared table: 3 yd, 1 ch, 10 US ft)
  *   parseTyped("@1200,-300", 'mm') → { kind: 'rel', dx, dy }   what the wall tool takes from the keyboard (see below)
  */
 import { parseLength } from './libitem.js';
+import { parseTo } from './unit-table.js';   // 0.7 UNITS: the shared table (lib/units; a copy: tools/units/sync.mjs)
+import { defaultUnit, fillSelect, isOn } from './unit-prefs.js';
 
-export const UNITS = ['ftin', 'mm'];
-const INCH = 25.4;
+/*
+ * Display units and the toolbar selector: Joel (yisraelk), getcadcraft/bimcraft PR #4 (0.7). Since 0.7 UNITS they are
+ * BimCraft's use of the shared unit table: the selector lists the units turned on in Settings › General › Units (plus
+ * the one in use), a new browser starts on the starred length unit when BimCraft has it, and the choice saved in
+ * localStorage "bimcraft.model.units" is kept as it was.
+ */
+// GH.3-A (rule 39): the six units, the table ids and every number-to-text helper live in the neutral display-units.js
+// (lib/units; a copy: tools/units/sync-display.mjs bimcraft). Re-exported here so every import of model-units.js still works.
+import { UNITS, TABLE_ID, INCH, FACTOR, isMetric } from './display-units.js';
+export * from './display-units.js';
+const FROM_TABLE = Object.fromEntries(Object.entries(TABLE_ID).map(([k, v]) => [v, k]));
+let displayUnits = null;
+/** A unit BimCraft shows only while Settings › General › Units has it turned on: turning feet and inches off moves a person to metric. */
+const offered = (u) => isOn(TABLE_ID[u]);
+export function getDisplayUnits() {
+  if (displayUnits && offered(displayUnits)) return displayUnits;
+  try { const saved = localStorage.getItem('bimcraft.model.units'); if (UNITS.includes(saved) && offered(saved)) return saved; } catch (e) { /* no storage */ }
+  const star = defaultUnit('length', { offer: Object.values(TABLE_ID) });
+  if (star) return FROM_TABLE[star];
+  const own = defaultUnits();
+  return offered(own) ? own : (UNITS.find(offered) || own);
+}
+/**
+ * The toolbar's unit <select> rebuilt from Settings › General › Units: the units turned on (in the table's order) and
+ * `current` always; each option keeps BimCraft's own words (read once from the options ui.inc printed).
+ */
+export function fillUnitSelect(select, current) {
+  if (!select) return [];
+  if (!select._bcLabels) select._bcLabels = new Map([...select.options].map((o) => [o.value, o.textContent]));
+  const words = select._bcLabels;
+  select.value = current;
+  return fillSelect(select, 'length', { offer: UNITS.map((u) => [u, TABLE_ID[u]]), keep: [current], label: (id, v) => words.get(v) || v });
+}
+export function setDisplayUnits(unit) {
+  if (!UNITS.includes(unit)) return;
+  displayUnits = unit;
+  try { localStorage.setItem('bimcraft.model.units', unit); } catch (e) { /* this tab */ }
+}
 
 /** The default for a new building or a model without a choice: feet and inches where the browser speaks US English. */
 export function defaultUnits(lang = (typeof navigator !== 'undefined' && navigator.language) || 'en-US') {
   return /^en-(US|LR|MM)$/i.test(lang) ? 'ftin' : 'mm';
-}
-
-/** Millimetres as text. `ftin`: feet-inches to 1/16" (fractions reduced); `mm`: whole millimetres (0.1 below 10). */
-export function fmtLen(mm, units = 'ftin', { unit = false } = {}) {
-  if (!Number.isFinite(mm)) return '';
-  if (units === 'mm') {
-    const r = Math.abs(mm) < 10 ? Math.round(mm * 10) / 10 : Math.round(mm);
-    return (Object.is(r, -0) ? 0 : r) + (unit ? ' mm' : '');   // i18n-ignore: the unit symbol
-  }
-  const neg = mm < 0;
-  let sixteenths = Math.round(Math.abs(mm) / INCH * 16);
-  const ft = Math.floor(sixteenths / 192);
-  sixteenths -= ft * 192;
-  const inch = Math.floor(sixteenths / 16);
-  let frac = sixteenths - inch * 16, den = 16;
-  while (frac && frac % 2 === 0) { frac /= 2; den /= 2; }
-  const whole = ft || inch || !frac;   // 10'-0 1/4", but 1/4" alone
-  const inText = (whole ? String(inch) : '') + (frac ? (whole ? ' ' : '') + frac + '/' + den : '') + '"';
-  const s = ft ? ft + "'-" + inText : inText;
-  return (neg && sixteenths + ft ? '-' : '') + s;
 }
 
 /** Text → millimetres (NaN when it is not a length). Bare numbers: inches ('ftin') or millimetres ('mm'). */
@@ -44,15 +63,17 @@ export function parseLen(text, units = 'ftin') {
   const s = String(text ?? '').trim();
   if (!s) return NaN;
   // 12' 6" without the dash, 12'6, 6 1/2 (inches), 1/2"
-  let v = parseLength(s, units === 'mm' ? 1 : INCH);
+  let v = parseLength(s, FACTOR[units] || INCH);
   if (Number.isFinite(v)) return v;
   let m = s.match(/^(-?\d+(?:\.\d+)?)\s*'\s*-?\s*(\d+(?:\.\d+)?)?(?:\s+(\d+)\/(\d+))?\s*"?$/);
   if (m) return Math.sign(Number(m[1]) || 1) * (Math.abs(Number(m[1])) * 12 + Number(m[2] || 0) + (m[3] ? Number(m[3]) / Number(m[4]) : 0)) * INCH;
   m = s.match(/^(\d+)\s+(\d+)\/(\d+)$/);
-  if (m && units !== 'mm') return (Number(m[1]) + Number(m[2]) / Number(m[3])) * INCH;
+  if (m && !isMetric(units)) return (Number(m[1]) + Number(m[2]) / Number(m[3])) * INCH;
   m = s.match(/^(-?)\s*(\d+)\/(\d+)$/);
-  if (m && units !== 'mm' && Number(m[3])) return (m[1] ? -1 : 1) * Number(m[2]) / Number(m[3]) * INCH;
-  return NaN;
+  if (m && !isMetric(units) && Number(m[3])) return (m[1] ? -1 : 1) * Number(m[2]) / Number(m[3]) * INCH;
+  // any other length mark in the shared table (0.7 UNITS): 2.5 dm, 3 yd, 1 ch, 10 US ft, 400 nm
+  const r = parseTo(s, 'length', 'mm');
+  return r.ok ? r.value : NaN;
 }
 
 /**
@@ -95,7 +116,7 @@ function splitPair(t) {
 export const fmtAngle = (deg) => { let a = Math.round(((deg % 360) + 360) % 360 * 10) / 10; if (a === 360) a = 0; return a + '°'; };
 /** Square millimetres → m² (to 0.01) or ft² (to 0.1), as text with the unit. */
 export function fmtArea(mm2, units = 'ftin') {
-  if (units === 'mm') return (Math.round(mm2 / 1e4) / 100).toFixed(2) + ' m²';   // i18n-ignore: unit symbol
+  if (isMetric(units)) return (Math.round(mm2 / 1e4) / 100).toFixed(2) + ' m²';   // i18n-ignore: unit symbol
   return (Math.round(mm2 / (304.8 * 304.8) * 10) / 10).toFixed(1) + ' ft²';   // i18n-ignore: unit symbol
 }
 
@@ -109,6 +130,6 @@ export function parsePitch(text) {
 }
 /** A pitch as text: a rise over 12 to 1/4 in feet and inches, else degrees to 0.1°. */
 export function fmtPitch(deg, units = 'ftin') {
-  if (units === 'ftin') { const r = Math.round(Math.tan(deg * Math.PI / 180) * 12 * 4) / 4; return r + '/12'; }
+  if (!isMetric(units)) { const r = Math.round(Math.tan(deg * Math.PI / 180) * 12 * 4) / 4; return r + '/12'; }
   return (Math.round(deg * 10) / 10) + '°';
 }

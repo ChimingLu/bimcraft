@@ -13,6 +13,8 @@
  *       (every expression follows) · setParam(fam, key, { kind, value, formula, label })
  *   addSolid(fam, op) · removeSolid(fam, id) (its Booleans go too) · duplicateSolid(fam, id) · setSolid(fam, id, patch)
  *   addBoolean(fam, { op, a, b }) · removeBoolean(fam, id) · setBoolean(fam, id, patch) · operands(fam, exceptId) (free ones)
+ *   addConnector(fam, { domain, system }) · removeConnector(fam, id) · setConnector(fam, id, patch) (unhosted families only)
+ *   setFixture(fam, kind) ('' = not a plumbing fixture)
  *   points: pointsOf(s) · movePoint(fam, id, i, [u, v]) · insertPoint(fam, id, i, [u, v]) · removePoint(fam, id, i) ·
  *       setBulge(fam, id, i, b) · cycleArc(b) (straight → quarter arc left → quarter arc right → straight) · snap(v, step)
  *   handles: sizeHandles(fam, values, ctx) and solidHandles(fam, values, id, ctx) → [{ p, axis, label, target }] in the
@@ -21,19 +23,23 @@
  *       formulas), so the size being previewed changes and the recipe keeps its formulas.
  */
 import { parse, evaluate, renameIn, formatNumber, literal, NAME_RE, RESERVED } from './expr.js';
-import { readFamily, evaluateFamily, inputParams, sizeValues, planBounds, CONTEXT_NAMES, PARAM_KINDS, SOLID_OPS, STYLES, LIMITS } from './family-model.js';
+import { SYMBOL_KINDS, SYMBOL_FIELDS, SYMBOL_LIMITS, FILL_KEYS as SYM_FILLS } from './family-symbol.js';
+import { partExprs, hotspotExprs } from './family-model.js';
+import { fullValues, readFamily, evaluateFamily, inputParams, sizeValues, planBounds, CONTEXT_NAMES, PARAM_KINDS, SOLID_OPS, STYLES, LIMITS, isWordKind, cleanValue,
+  CONNECTOR_DOMAINS, CONNECTOR_DIRS, CONNECTOR_FIELDS } from './family-model.js';
 
 const err = (key, fill = {}) => ({ ok: false, error: { key, fill } });
 const copy = (fam) => JSON.parse(JSON.stringify(fam));
 const done = (fam) => ({ ok: true, fam });
 
-export const names = (fam) => [...fam.params.map((p) => p.key), ...(fam.host === 'wall' ? CONTEXT_NAMES : [])];
+export const names = (fam) => [...fam.params.filter((p) => !isWordKind(p.kind)).map((p) => p.key), ...(fam.host === 'wall' ? CONTEXT_NAMES : [])];   // words (text, material, fill) are not in expressions
 
 /** Every expression field of a solid as [field label, getter, setter] (getter/setter on the raw recipe solid). */
 function exprFields(s) {
   const out = [];
   const plain = (k) => out.push([k, () => s[k], (v) => { s[k] = v; }]);
   if (s.visible) plain('visible');
+  if (s.array) for (const k of ['count', 'dx', 'dy', 'dz']) out.push(['array ' + k, () => s.array[k], (v) => { s.array[k] = v; }]);
   if (s.op === 'box') for (const k of ['x0', 'y0', 'z0', 'x1', 'y1', 'z1']) plain(k);
   else if (s.op === 'extrude' || s.op === 'revolve') {
     plain('at');
@@ -46,12 +52,24 @@ function exprFields(s) {
   }
   return out;
 }
+/** Every expression field of a symbol part as [label, getter, setter]. */
+function symFields(p) {
+  const out = [], plain = (k) => { if (p[k] !== undefined) out.push([k, () => p[k], (v) => { p[k] = v; }]); };
+  for (const k of ['visible', 'pen', 'zmin', 'zmax', 'rot', ...(SYMBOL_FIELDS[p.kind] || [])]) plain(k);
+  if (p.array) for (const k of ['count', 'dx', 'dy']) out.push(['array ' + k, () => p.array[k], (v) => { p.array[k] = v; }]);
+  if (p.kind === 'poly') p.pts.forEach((pt, i) => { for (const j of [0, 1]) out.push(['point ' + (i + 1), () => pt[j], (v) => { pt[j] = v; }]); });
+  return out;
+}
 const usesName = (src, key) => { const p = parse(String(src ?? '')); return p.ok && p.uses.includes(key); };
 
 export function usesOf(fam, key) {
   const out = [];
   for (const p of fam.params) if (p.formula && usesName(p.formula, key)) out.push(p.key);
   for (const s of fam.solids) for (const [label, get] of exprFields(s)) if (usesName(get(), key)) out.push((s.name || s.id) + ' ' + label);
+  for (const p of fam.symbol?.parts || []) for (const [label, get] of symFields(p)) if (usesName(get(), key)) out.push('symbol ' + p.id + ' ' + label);
+  for (const h of fam.hotspots || []) { for (const [label, src] of hotspotExprs(h)) if (usesName(src, key)) out.push('hotspot ' + h.id + ' ' + label); if (h.drives === key) out.push('hotspot ' + h.id + ' drives'); }
+  for (const p of fam.parts || []) { for (const [label, src] of partExprs(p)) if (usesName(src, key)) out.push('part ' + p.id + ' ' + label); for (const [k, v] of Object.entries(p.values || {})) if (usesName(v, key) || v === key) out.push('part ' + p.id + ' ' + k); }
+  for (const c of fam.connectors || []) for (const k of CONNECTOR_FIELDS) if (usesName(c[k], key)) out.push((c.name || c.id) + ' ' + k);
   return out;
 }
 
@@ -67,9 +85,8 @@ export function addParam(fam, { key, kind = 'length', value = 0, label = '' } = 
   const bad = keyProblem(fam, key);
   if (bad) return bad;
   const f = copy(fam);
-  const v = Number(value);
-  const q = { key, kind: PARAM_KINDS.includes(kind) ? kind : 'number', value: Number.isFinite(v) ? v : 0 };
-  if (q.kind === 'yesno') q.value = q.value ? 1 : 0;
+  const k = PARAM_KINDS.includes(kind) ? kind : 'number';
+  const q = { key, kind: k, value: cleanValue(k, isWordKind(k) ? (typeof value === 'string' ? value : k === 'fill' ? 'none' : '') : value) };
   if (label) q.label = String(label).slice(0, LIMITS.name);
   f.params.push(q);
   return done(f);
@@ -96,14 +113,42 @@ export function renameParam(fam, from, to) {
   const f = copy(fam);
   for (const p of f.params) { if (p.key === from) p.key = to; if (p.formula) p.formula = renameIn(p.formula, from, to); }
   for (const s of f.solids) for (const [, get, set] of exprFields(s)) { const v = get(); if (typeof v === 'string') set(renameIn(v, from, to)); }
+  for (const p of f.symbol?.parts || []) {
+    for (const [, get, set] of symFields(p)) { const v = get(); if (typeof v === 'string') set(renameIn(v, from, to)); }
+    if (p.fill === from) p.fill = to;   // a Fill parameter's name
+    if (p.kind === 'text') p.text = p.text.split('{' + from + '}').join('{' + to + '}');
+  }
+  for (const s of f.solids) if (s.material === from) s.material = to;   // a Material parameter's name
+  for (const h of f.hotspots || []) { h.at = h.at.map((x) => renameIn(x, from, to)); if (h.to) h.to = h.to.map((x) => renameIn(x, from, to)); if (h.drives === from) h.drives = to; }
+  for (const p of f.parts || []) {
+    p.at = p.at.map((x) => renameIn(x, from, to));
+    if (p.rot !== undefined) p.rot = renameIn(p.rot, from, to);
+    if (p.visible !== undefined) p.visible = renameIn(p.visible, from, to);
+    for (const [k, v] of Object.entries(p.values || {})) p.values[k] = v === from ? to : (parse(v).ok ? renameIn(v, from, to) : v);   // a word parameter's name, or an expression
+  }
+  for (const c of f.connectors || []) for (const k of CONNECTOR_FIELDS) if (typeof c[k] === 'string') c[k] = renameIn(c[k], from, to);
   if (Array.isArray(f.sizes)) for (const z of f.sizes) if (z.values && from in z.values) { z.values[to] = z.values[from]; delete z.values[from]; }
   return done(f);
 }
 export function setParam(fam, key, patch = {}) {
   const f = copy(fam), p = f.params.find((x) => x.key === key);
   if (!p) return err('fam.err.noparam', { name: key });
-  if ('kind' in patch && PARAM_KINDS.includes(patch.kind)) { p.kind = patch.kind; if (p.kind === 'yesno') p.value = p.value ? 1 : 0; }
-  if ('value' in patch) { const v = Number(patch.value); if (!Number.isFinite(v) || Math.abs(v) > LIMITS.value) return err('fam.err.value', { name: key }); p.value = p.kind === 'yesno' ? (v ? 1 : 0) : v; }
+  if ('kind' in patch && PARAM_KINDS.includes(patch.kind)) {
+    if (isWordKind(patch.kind) !== isWordKind(p.kind)) {   // between a number and a word the old value means nothing
+      const used = usesOf(fam, key);
+      if (isWordKind(patch.kind) && (used.length || p.formula)) return err('fam.err.paramused', { name: key, where: (used.length ? used : [key]).slice(0, 3).join(', ') });
+      p.value = patch.kind === 'fill' ? 'none' : isWordKind(patch.kind) ? '' : 0; delete p.formula;
+    }
+    p.kind = patch.kind; p.value = cleanValue(p.kind, p.value);
+  }
+  if ('value' in patch) {
+    if (isWordKind(p.kind)) { p.value = cleanValue(p.kind, patch.value); if (p.kind === 'material' && patch.value && !p.value) return err('fam.err.value', { name: key }); }
+    else { const v = Number(patch.value); if (!Number.isFinite(v) || Math.abs(v) > LIMITS.value) return err('fam.err.value', { name: key }); p.value = cleanValue(p.kind, v); }
+  }
+  if ('instance' in patch) {   // set per placed element instead of per size
+    if (patch.instance && (p.formula || (fam.host === 'wall' && (key === 'Width' || key === 'Height')))) return err('fam.err.instance', { name: key });
+    if (patch.instance) p.instance = true; else delete p.instance;
+  }
   if ('label' in patch) { const l = String(patch.label ?? '').replace(/\s+/g, ' ').trim().slice(0, LIMITS.name); if (l) p.label = l; else delete p.label; }
   if ('formula' in patch) {
     const src = String(patch.formula ?? '').trim();
@@ -188,6 +233,8 @@ export function setSolid(fam, id, patch = {}) {
   for (const [k, v] of Object.entries(patch)) {
     if (k === 'name') { const n = String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, 60); if (n) s.name = n; else delete s.name; continue; }
     if (k === 'style') { if (STYLES[v]) s.style = v; continue; }
+    if (k === 'detail') { if (v === 'medium' || v === 'fine') s.detail = v; else delete s.detail; continue; }   // shown from that level on
+    if (k === 'material') { const m = String(v ?? '').trim(); if (!m) { delete s.material; continue; } if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(m)) return err('fam.err.field', { id, field: k }); s.material = m; continue; }
     if (k === 'plane') { if (['xy', 'xz', 'yz'].includes(v)) s.plane = v; continue; }
     if (k === 'visible') { const src = String(v ?? '').trim(); if (!src) { delete s.visible; continue; } }
     if (['profile', 'path', 'axis'].includes(k)) { s[k] = copy(v); continue; }
@@ -199,6 +246,232 @@ export function setSolid(fam, id, patch = {}) {
     s[k] = src;
   }
   return checked(f);
+}
+
+// ======================================================================================================== hotspots
+function freeHotId(fam) { const have = new Set([...fam.solids.map((s) => s.id), ...(fam.booleans || []).map((b) => b.id), ...(fam.parts || []).map((p) => p.id), ...(fam.hotspots || []).map((h) => h.id)]); for (let i = 1; ; i++) if (!have.has('h' + i)) return 'h' + i; }
+/** A hotspot: a point (or an edge, from `at` to `to`) in the family's axes that drags the number parameter `drives` along `axis`. */
+export function addHotspot(fam, { kind = 'point', axis = 'x', drives = '', at = null, to = null, name = '' } = {}) {
+  if ((fam.hotspots || []).length >= LIMITS.hotspots) return err('fam.err.toomany', { what: 'hotspots', n: LIMITS.hotspots });
+  const dragable = (p) => !p.formula && !isWordKind(p.kind) && p.kind !== 'yesno' && !p.instance;
+  const cand = fam.params.find((p) => p.key === drives && dragable(p)) || fam.params.find(dragable);
+  if (!cand) return err('fam.err.hotspot', { id: '' });
+  const has = (k) => fam.params.some((p) => p.key === k && !isWordKind(p.kind));
+  const W = has('Width') ? 'Width' : '300', D = has('Depth') ? 'Depth' : '300', H = has('Height') ? 'Height' : '300';
+  const centred = fam.host !== 'wall';
+  const dflt = axis === 'x' ? [centred ? `(${W} / 2)` : W, `(${D} / 2)`, `(${H} / 2)`] : axis === 'y' ? ['0', D, `(${H} / 2)`] : ['0', `(${D} / 2)`, H];
+  const f = copy(fam), id = freeHotId(f);
+  const h = { id, kind: kind === 'edge' ? 'edge' : 'point', axis: ['x', 'y', 'z'].includes(axis) ? axis : 'x', drives: cand.key, at: (at || dflt).map(String) };
+  if (name) h.name = String(name).slice(0, 60);
+  if (h.kind === 'edge') h.to = (to || [h.at[0], axis === 'y' ? '0' : h.at[1], axis === 'z' ? '0' : h.at[2]]).map(String);
+  (f.hotspots ||= []).push(h);
+  return { ...checked(f), id };
+}
+export function removeHotspot(fam, id) {
+  if (!(fam.hotspots || []).some((h) => h.id === id)) return err('fam.err.hotspot', { id });
+  const f = copy(fam);
+  f.hotspots = f.hotspots.filter((h) => h.id !== id);
+  if (!f.hotspots.length) delete f.hotspots;
+  return checked(f);
+}
+export function setHotspot(fam, id, patch = {}) {
+  const f = copy(fam), h = (f.hotspots || []).find((x) => x.id === id);
+  if (!h) return err('fam.err.hotspot', { id });
+  if (patch.name !== undefined) { const n = String(patch.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 60); if (n) h.name = n; else delete h.name; }
+  if (patch.kind !== undefined) { h.kind = patch.kind === 'edge' ? 'edge' : 'point'; if (h.kind === 'point') delete h.to; else h.to ||= [...h.at]; }
+  if (patch.axis !== undefined && ['x', 'y', 'z'].includes(patch.axis)) h.axis = patch.axis;
+  if (patch.drives !== undefined) h.drives = String(patch.drives);
+  for (const k of ['at', 'to']) if (patch[k] !== undefined) {
+    if (k === 'to' && h.kind !== 'edge') continue;
+    const out = [];
+    for (let i = 0; i < 3; i++) {
+      const v = patch[k][i], src = typeof v === 'number' ? formatNumber(v) : String(v ?? '').trim();
+      if (!src) return err('fam.err.field', { id, field: k });
+      const ps = parse(src, names(f));
+      if (!ps.ok) return err('fam.err.unknown', { where: 'hotspot ' + id + ' ' + k, why: ps.error });
+      out.push(src);
+    }
+    h[k] = out;
+  }
+  return checked(f);
+}
+/**
+ * Drag a hotspot to `to` ([x, y, z] in the family's axes): the number parameter it drives is solved so that the hotspot's position along its axis
+ * is where it was dragged, through any formulas between them → { ok, values } (the size's values with that one changed, for the caller to place as
+ * a size), or the error (a length that would not be positive, no value that gets there).
+ */
+export function dragHotspot(fam, values, id, to, ctx = {}) {
+  const h = (fam.hotspots || []).find((x) => x.id === id);
+  if (!h) return err('fam.err.hotspot', { id });
+  const v = { ...sizeValues(fam, values) }, axis = 'xyz'.indexOf(h.axis), key = h.drives, p = fam.params.find((x) => x.key === key);
+  if (!p) return err('fam.err.hotspot', { id });
+  const src = h.at[axis], want = to[axis];
+  if (!Number.isFinite(want)) return err('fam.err.handle');
+  const g = (x) => fieldValue(fam, { ...v, [key]: x }, ctx, src);
+  let x = solve1(g, v[key], want);
+  if (x === null) return err('fam.err.handle');
+  if (p.kind === 'integer') x = Math.round(x);
+  if (p.kind === 'pen') x = Math.min(16, Math.max(1, Math.round(x)));
+  if (p.kind === 'length' && !(x > 0)) return err('fam.err.handle');
+  return { ok: true, values: { ...v, [key]: round3(x) }, key };
+}
+
+// ======================================================================================================== families inside (nested)
+function freePartId(fam) { const have = new Set([...fam.solids.map((s) => s.id), ...(fam.booleans || []).map((b) => b.id), ...(fam.parts || []).map((p) => p.id)]); for (let i = 1; ; i++) if (!have.has('p' + i)) return 'p' + i; }
+/** A family put inside this one: at (x, y, z) in this family's axes, turned in quarter turns, with the values this one gives its parameters. */
+export function addPart(fam, familyKey, { at = ['0', '0', '0'], rot = '', values = {} } = {}) {
+  if ((fam.parts || []).length >= LIMITS.parts) return err('fam.err.toomany', { what: 'parts', n: LIMITS.parts });
+  if (typeof familyKey !== 'string' || familyKey === fam.key) return err('fam.err.nestcycle', { name: String(familyKey ?? '') });
+  const f = copy(fam), id = freePartId(f);
+  const p = { id, family: familyKey, at: at.map(String) };
+  if (rot !== '' && rot !== undefined) p.rot = String(rot);
+  if (Object.keys(values).length) p.values = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v)]));
+  f.parts = [...(f.parts || []), p];
+  return { ...checked(f), id };
+}
+export function removePart(fam, id) {
+  if (!(fam.parts || []).some((p) => p.id === id)) return err('fam.err.part', { id });
+  const f = copy(fam);
+  f.parts = f.parts.filter((p) => p.id !== id);
+  if (!f.parts.length) delete f.parts;
+  if (!f.solids.length && !f.parts) return err('fam.err.nosolids');
+  return checked(f);
+}
+/** Change a part: at [x, y, z], rot, visible ('' removes), family (another key), values { Param: number | expression | word | '' to drop }. */
+export function setPart(fam, id, patch = {}) {
+  const f = copy(fam), p = (f.parts || []).find((x) => x.id === id);
+  if (!p) return err('fam.err.part', { id });
+  const expr = (k, v, optional) => {
+    const src = typeof v === 'number' ? formatNumber(v) : String(v ?? '').trim();
+    if (!src) { if (optional) return null; return false; }
+    const ps = parse(src, names(f));
+    if (!ps.ok) return { bad: err('fam.err.unknown', { where: 'part ' + id + ' ' + k, why: ps.error }) };
+    return src;
+  };
+  if (patch.family !== undefined) { if (typeof patch.family !== 'string' || patch.family === f.key) return err('fam.err.nestcycle', { name: id }); p.family = patch.family; }
+  if (patch.at !== undefined) {
+    const at = [];
+    for (let i = 0; i < 3; i++) { const v = expr('at ' + 'xyz'[i], patch.at[i], false); if (v === false) return err('fam.err.field', { id, field: 'at' }); if (v?.bad) return v.bad; at.push(v); }
+    p.at = at;
+  }
+  for (const k of ['rot', 'visible']) if (patch[k] !== undefined) { const v = expr(k, patch[k], true); if (v?.bad) return v.bad; if (v === null) delete p[k]; else p[k] = v; }
+  if (patch.values !== undefined) {
+    for (const [name, v] of Object.entries(patch.values)) {
+      const src = typeof v === 'number' ? formatNumber(v) : String(v ?? '').trim();
+      if (!src) { if (p.values) delete p.values[name]; continue; }
+      if (!NAME_RE.test(name)) return err('fam.err.param', { name });
+      (p.values ||= {})[name] = src;
+    }
+    if (p.values && !Object.keys(p.values).length) delete p.values;
+  }
+  return checked(f);
+}
+
+// ======================================================================================================== the 2D symbol
+/** A free symbol part id: "y1", "y2" … */
+function freeSymId(fam) { const have = new Set((fam.symbol?.parts || []).map((p) => p.id)); for (let i = 1; ; i++) if (!have.has('y' + i)) return 'y' + i; }
+/** Where a new part starts: inside the family's footprint (Width × Depth when it has them, else 300 mm). */
+function symFrame(fam) {
+  const has = (k) => fam.params.some((p) => p.key === k && !isWordKind(p.kind));
+  return { W: has('Width') ? 'Width' : '300', D: has('Depth') ? 'Depth' : '300' };
+}
+export function addSymbolPart(fam, kind = 'rect') {
+  if (!SYMBOL_KINDS.includes(kind)) return err('fam.err.sympart', { id: String(kind) });
+  if ((fam.symbol?.parts || []).length >= SYMBOL_LIMITS.parts) return err('fam.err.toomany', { what: 'symbols', n: SYMBOL_LIMITS.parts });
+  const f = copy(fam), id = freeSymId(f), F = symFrame(f);
+  const half = `(-${F.W} / 2)`, halfp = `(${F.W} / 2)`;
+  const part = kind === 'rect' ? { id, kind, x0: half, y0: '0', x1: halfp, y1: F.D, fill: 'none' }
+    : kind === 'line' ? { id, kind, x0: half, y0: '0', x1: halfp, y1: F.D }
+    : kind === 'circle' ? { id, kind, cx: '0', cy: `(${F.D} / 2)`, r: `(${F.D} / 4)`, fill: 'none' }
+    : kind === 'arc' ? { id, kind, cx: '0', cy: '0', r: `(${F.D} / 2)`, a0: '0', a1: '90' }
+    : kind === 'poly' ? { id, kind, pts: [[half, '0'], [halfp, '0'], ['0', F.D]], closed: true, fill: 'none' }
+    : { id, kind, x: '0', y: `(${F.D} / 2)`, h: '100', text: 'Text' };
+  f.symbol = { mode: f.symbol?.mode || 'symbol', parts: [...(f.symbol?.parts || []), part] };
+  return { ...checked(f), id };
+}
+export function removeSymbolPart(fam, id) {
+  if (!(fam.symbol?.parts || []).some((p) => p.id === id)) return err('fam.err.sympart', { id });
+  const f = copy(fam);
+  f.symbol.parts = f.symbol.parts.filter((p) => p.id !== id);
+  if (!f.symbol.parts.length) delete f.symbol;
+  return checked(f);
+}
+export function duplicateSymbolPart(fam, id) {
+  const p = (fam.symbol?.parts || []).find((x) => x.id === id);
+  if (!p) return err('fam.err.sympart', { id });
+  if (fam.symbol.parts.length >= SYMBOL_LIMITS.parts) return err('fam.err.toomany', { what: 'symbols', n: SYMBOL_LIMITS.parts });
+  const f = copy(fam), nid = freeSymId(f);
+  f.symbol.parts.splice(f.symbol.parts.findIndex((x) => x.id === id) + 1, 0, { ...copy(p), id: nid });
+  return { ...checked(f), id: nid };
+}
+/** Change a part: expression fields (text or number; '' removes pen / fill / visible / zmin / zmax / rot), fill, text, closed, pts. */
+export function setSymbolPart(fam, id, patch = {}) {
+  const f = copy(fam), p = (f.symbol?.parts || []).find((x) => x.id === id);
+  if (!p) return err('fam.err.sympart', { id });
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === 'fill') { const s = String(v ?? '').trim(); if (!s || s === 'none') { p.fill = 'none'; continue; } if (!SYM_FILLS.includes(s) && !/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(s)) return err('fam.err.symfield', { id, field: k }); p.fill = s; continue; }
+    if (k === 'text') { const s = String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, SYMBOL_LIMITS.text); if (!s.trim()) return err('fam.err.symfield', { id, field: k }); p.text = s; continue; }
+    if (k === 'closed') { p.closed = !!v; continue; }
+    if (k === 'detail') { if (v === 'medium' || v === 'fine') p.detail = v; else delete p.detail; continue; }
+    if (k === 'pts') { p.pts = copy(v); continue; }
+    const optional = ['visible', 'pen', 'zmin', 'zmax', 'rot'].includes(k);
+    const src = typeof v === 'number' ? formatNumber(v) : String(v ?? '').trim();
+    if (!src) { if (optional) { delete p[k]; continue; } return err('fam.err.symfield', { id, field: k }); }
+    if (!optional && !(SYMBOL_FIELDS[p.kind] || []).includes(k)) return err('fam.err.symfield', { id, field: k });
+    const ps = parse(src, names(f));
+    if (!ps.ok) return err('fam.err.unknown', { where: 'symbol ' + id + ' ' + k, why: ps.error });
+    p[k] = src;
+  }
+  return checked(f);
+}
+/** Repeat a symbol part: { count, dx, dy } or null. */
+export function setSymbolArray(fam, id, spec) {
+  const f = copy(fam), p = (f.symbol?.parts || []).find((x) => x.id === id);
+  if (!p) return err('fam.err.sympart', { id });
+  if (spec === null || spec === undefined) { delete p.array; return checked(f); }
+  const a = {};
+  for (const k of ['count', 'dx', 'dy']) {
+    const v = spec[k], src = typeof v === 'number' ? formatNumber(v) : String(v ?? (k === 'count' ? '' : '0')).trim() || (k === 'count' ? '' : '0');
+    if (!src) return err('fam.err.symfield', { id, field: 'array ' + k });
+    const ps = parse(src, names(f));
+    if (!ps.ok) return err('fam.err.unknown', { where: 'symbol ' + id + ' array ' + k, why: ps.error });
+    a[k] = src;
+  }
+  p.array = a;
+  return checked(f);
+}
+/** The symbol drawn in the plan ('symbol') or the cut of the solids ('cut'). */
+export function setSymbolMode(fam, mode) {
+  if (!fam.symbol) return err('fam.err.sympart', { id: '' });
+  const f = copy(fam); f.symbol.mode = mode === 'cut' ? 'cut' : 'symbol';
+  return checked(f);
+}
+/** Move a point of a poly part (symbol axes, mm). */
+export function moveSymbolPoint(fam, id, i, [x, y]) {
+  const f = copy(fam), p = (f.symbol?.parts || []).find((q) => q.id === id);
+  if (!p || p.kind !== 'poly' || !p.pts[i]) return err('fam.err.sympart', { id });
+  p.pts[i] = [formatNumber(x), formatNumber(y)];
+  return checked(f);
+}
+
+/** Repeat a solid: { count, dx, dy, dz } (numbers or expressions; count a whole number of 1–200, the steps in the family's axes), or null for one solid. */
+export function setSolidArray(fam, id, spec) {
+  const f = copy(fam), s = f.solids.find((x) => x.id === id);
+  if (!s) return err('fam.err.solid', { id });
+  if (spec === null || spec === undefined) { delete s.array; return checked(f); }
+  const a = {};
+  for (const k of ['count', 'dx', 'dy', 'dz']) {
+    const v = spec[k];
+    const src = typeof v === 'number' ? formatNumber(v) : String(v ?? (k === 'count' ? '' : '0')).trim() || (k === 'count' ? '' : '0');
+    if (!src) return err('fam.err.field', { id, field: 'array ' + k });
+    const ps = parse(src, names(f));
+    if (!ps.ok) return err('fam.err.unknown', { where: (s.name || id) + ' array ' + k, why: ps.error });
+    a[k] = src;
+  }
+  s.array = a;
+  const r = checked(f);
+  if (r.ok) { const ev = evaluateFamily(r.fam, {}, { wallThickness: 140 }); if (!ev.ok && ev.error.key === 'fam.err.arraycount') return { ok: false, error: ev.error, fam: f }; }
+  return r;
 }
 
 // ======================================================================================================== Booleans
@@ -234,6 +507,52 @@ export function setBoolean(fam, id, patch = {}) {
   const free = new Set([...operands(fam, id)]);
   for (const k of ['a', 'b']) if (patch[k] !== undefined) { if (!free.has(patch[k]) && patch[k] !== b[k]) return err('fam.err.boolean', { id }); b[k] = patch[k]; }
   if (b.a === b.b) return err('fam.err.boolean', { id });
+  return checked(f);
+}
+
+// ======================================================================================================== connectors
+const freeConnectorId = (fam) => { const have = new Set((fam.connectors || []).map((c) => c.id)); for (let i = 1; ; i++) if (!have.has('c' + i)) return 'c' + i; };
+/** A new connector at the family's origin, pointing down (a drain) for a pipe, up for a duct. */
+export function addConnector(fam, { domain = 'pipe', system = '' } = {}) {
+  if (fam.host === 'wall') return err('fam.err.connhosted');
+  if (!CONNECTOR_DOMAINS.includes(domain)) return err('fam.err.connector', { id: String(domain) });
+  if ((fam.connectors || []).length >= LIMITS.connectors) return err('fam.err.toomany', { what: 'connectors', n: LIMITS.connectors });
+  const f = copy(fam), id = freeConnectorId(f);
+  const c = domain === 'pipe' ? { id, domain, system: system || 'cw', x: '0', y: '0', z: '0', dir: '-z', size: '20', flow: 'in' }
+    : { id, domain, system: system || 'supply', x: '0', y: '0', z: '0', dir: '+z', size: '150', flow: 'in' };
+  f.connectors = [...(f.connectors || []), c];
+  return { ...checked(f), id };
+}
+export function setFixture(fam, kind) {
+  const f = copy(fam);
+  if (kind) f.fixture = kind; else delete f.fixture;
+  return checked(f);
+}
+export function removeConnector(fam, id) {
+  if (!(fam.connectors || []).some((c) => c.id === id)) return err('fam.err.connector', { id });
+  const f = copy(fam);
+  f.connectors = f.connectors.filter((c) => c.id !== id);
+  if (!f.connectors.length) delete f.connectors;
+  return checked(f);
+}
+/** Change a connector: name, domain, system, dir, flow, and x, y, z, size (numbers or expressions of the parameters). */
+export function setConnector(fam, id, patch = {}) {
+  const f = copy(fam), c = (f.connectors || []).find((x) => x.id === id);
+  if (!c) return err('fam.err.connector', { id });
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === 'name') { const n = String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, 60); if (n) c.name = n; else delete c.name; continue; }
+    if (k === 'domain') { if (!CONNECTOR_DOMAINS.includes(v)) return err('fam.err.connfield', { id, field: k }); c.domain = v; continue; }
+    if (k === 'dir') { if (!CONNECTOR_DIRS[v]) return err('fam.err.connfield', { id, field: k }); c.dir = v; continue; }
+    if (k === 'flow') { c.flow = v === 'out' ? 'out' : 'in'; continue; }
+    if (k === 'system') { c.system = String(v ?? ''); continue; }
+    if (!CONNECTOR_FIELDS.includes(k)) continue;
+    if (typeof v === 'number') { if (!Number.isFinite(v)) return err('fam.err.connfield', { id, field: k }); c[k] = formatNumber(v); continue; }
+    const src = String(v ?? '').trim();
+    if (!src) return err('fam.err.connfield', { id, field: k });
+    const ps = parse(src, names(f));
+    if (!ps.ok) return err('fam.err.unknown', { where: (c.name || id) + ' ' + k, why: ps.error });
+    c[k] = src;
+  }
   return checked(f);
 }
 
@@ -424,8 +743,25 @@ export function solve1(g, x0, target) {
   return null;
 }
 /** Drag a handle so its face lands at `to` (mm along the handle's axis line: the coordinate on that axis). */
+/** The hotspots as handles for the preview: [{ p, axis (a unit vector), label, target: { kind: 'hotspot', id } }]. */
+export function hotspotHandles(fam, values, ctx = {}) {
+  const ev = evaluateFamily(fam, values, ctx);
+  if (!ev.ok) return [];
+  return (ev.hotspots || []).map((h) => {
+    const p = h.kind === 'edge' && h.q ? h.p.map((x, i) => (x + h.q[i]) / 2) : h.p;   // an edge's handle sits at its middle
+    return { p, axis: AX['xyz'.indexOf(h.axis)], label: h.name || h.id, target: { kind: 'hotspot', id: h.id } };
+  });
+}
 export function dragHandle(fam, values, h, to, ctx = {}) {
   const v = sizeValues(fam, values), T = h.target;
+  if (T.kind === 'hotspot') {   // `to` is where along the hotspot's own axis it was dragged
+    const hs = (fam.hotspots || []).find((x) => x.id === T.id);
+    if (!hs) return err('fam.err.hotspot', { id: T.id });
+    const vec = [0, 0, 0];
+    vec['xyz'.indexOf(hs.axis)] = to;
+    const r = dragHotspot(fam, values, T.id, vec, ctx);
+    return r.ok ? { ok: true, fam, values: { ...fullValues(fam, values), ...r.values } } : r;
+  }
   // the parameter named for the handle's axis (Width for x, Depth for y, Height for z) when the field uses it, else the first
   const pick = (cands) => cands.find((k) => rank(k) === T.axis) || [...cands].sort((a, b) => rank(a) - rank(b))[0];
   if (T.kind === 'size') {

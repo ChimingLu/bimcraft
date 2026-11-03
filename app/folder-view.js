@@ -39,6 +39,7 @@ export function renderFolder(container, scan, { openFile }) {
     plural('folder.count.models', scan.models.length),
     scan.cad.length ? plural('folder.count.cad', scan.cad.length) : null,
     scan.ifc.length ? plural('folder.count.ifc', scan.ifc.length) : null,
+    scan.bundles?.length ? plural('folder.count.bundles', scan.bundles.length) : null,
     plural('folder.count.files', scan.files),
     bytes(scan.totalSize),
   ].filter(Boolean);
@@ -155,6 +156,15 @@ export function renderFolder(container, scan, { openFile }) {
       el('ul', { className: 'bc-copies' }, scan.ifc.map((f) => el('li', {},
         el('button', { type: 'button', className: 'bc-linkbtn', onClick: () => openFile(f.file, f.path) }, f.path),
         el('span', { className: 'bc-sub' }, t('folder.ifc.meta', { size: bytes(f.file.size), date: day(f.file.lastModified) }))))),
+    ));
+  }
+
+  if (scan.bundles?.length) {   // 0.7 BIM-BUNDLE-OPEN: project bundles in the folder open like a model
+    sections.push(el('section', { className: 'bc-card-sec', 'data-folder-bundles': '' },
+      el('h2', {}, t('folder.bundles.title')),
+      el('ul', { className: 'bc-copies' }, scan.bundles.map((f) => el('li', {},
+        el('button', { type: 'button', className: 'bc-linkbtn', 'data-folder-bundle': f.path, onClick: () => openFile(f.file, f.path) }, f.path),
+        el('span', { className: 'bc-sub' }, t('folder.bundles.meta', { size: bytes(f.file.size), date: day(f.file.lastModified) }))))),
     ));
   }
 

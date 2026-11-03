@@ -32,7 +32,7 @@
 import { ids, val, inv4, mul4, apply4 } from './ifc-util.js';
 import { round } from './model-write.js';
 import { readLevels } from './model-levels.js';
-import { readWalls, wallOutlines, buildingOutlines } from './model-walls.js';
+import { readWalls, wallOutlines, buildingOutlines, wallsThrough, PLAN_CUT } from './model-walls.js';
 import { planLoops, loopAt, labelPoint, area as loopArea, perim } from './model-rooms.js';
 import { roofPlan } from './model-roof.js';
 import { writeRoofParts, edgeKinds, roofGeometry, ROOF_DEFAULTS } from './res-roof.js';   // 0.5 part 4 RC.1 (bim-residential)
@@ -52,7 +52,10 @@ export const CEILING_PATTERNS = [
 
 // ---------------------------------------------------------------------------------------------------------------- reading
 export function storeyLoops(w, storey) {
-  const walls = readWalls(w, storey);
+  // 0.7 BIM-MLWALL: walls of other levels that run up through this one close its rooms too (joined with this level's own walls)
+  const levels = readLevels(w);
+  const all = levels.length > 1 ? readWalls(w) : readWalls(w, storey);
+  const walls = [...all.filter((x) => x.storey === storey), ...(levels.length > 1 ? wallsThrough(all, levels, storey, PLAN_CUT) : [])];
   const polys = [...wallOutlines(walls.map((x) => ({ key: x.guid, a: x.a, b: x.b, t: x.t, bulge: x.bulge }))).values()];
   return { walls, ...planLoops(polys), outlines: buildingOutlines(walls) };
 }

@@ -17,7 +17,7 @@ Change what you drew: pick a wall, door or window, then type a new number in **P
    - **Wall type**: another of the starter types. The thickness and the layers change with it.
    - **Thickness**: any thickness. The type keeps its other layers and its main layer (the studs or the block) takes the difference, for example "Exterior 2×6, 200 mm".
    - **Length**: the wall's end moves along its line. A wall joined at that end comes with it.
-   - **Wall height**: **Up to the level above** follows that level (typing a height then sets how far below or above it the top is), **Fixed height** keeps the number you type.
+   - **Wall height**: **Up to the level above** follows that level, **Up to Level 3** (and any level further up) makes a wall that runs through the levels between; typing a height then sets how far below or above that level the top is. **Fixed height** keeps the number you type. **Runs through** lists the levels such a wall passes: it is drawn lighter in their plans, rooms there close against it, and doors and windows can be placed in it from those plans. It is moved and reshaped on the level it starts on.
    - **Base offset**: how far above the level the wall starts. Its top stays where it was.
    - **Outside**: {{ui:Flip}} puts the outside layers on the other face.
    - **Location line**: **Center line**, **Outside face**, **Inside face**, **Left face** or **Right face**. Changing it moves nothing. Later, when the wall gets thicker (by type or **Thickness**) or its outside is flipped, the location line stays put and the wall grows or flips around it. A straight wall meeting it at a corner follows, so the corner still closes. The picked wall's location line is drawn dashed in the plan. Pick several walls to set it for all of them.
@@ -45,5 +45,5 @@ Pick several walls (or several doors, or several windows) with {{key:Shift}}+cli
 
 ## Good to know
 
-- The numbers show in the units chosen in the **Levels** panel.
+- The numbers show in the {{ui:Units}} chosen on the toolbar.
 - Walls, doors and windows from other programs show their IFC data in **Properties** as before, without this box.

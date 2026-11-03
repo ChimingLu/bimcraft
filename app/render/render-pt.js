@@ -1,12 +1,18 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /**
- * render-pt.js — Render a picture › High quality (0.5 RC.11 (c)): the same scene the fast render takes (render-core.js),
- * path traced by three-gpu-pathtracer (MIT, its own vendor folder: /assets/vendor/three-gpu-pathtracer/<version>/, with
- * three-mesh-bvh). Shared like the rest of render/ (canonical in modelcraft/dev, synced into bimcraft/dev). The library is
- * imported only when this mode runs.
+ * render-pt.js — Render a picture › High quality (0.5 RC.11 (c); 0.7 RN.1). Two engines for the same scene the fast render
+ * takes (render-core.js):
+ *   - **WebGPU** (0.7 RN.1): our own wavefront path tracer in WGSL (render/pt/, docs/RENDER-SPEC.md), wherever the browser
+ *     gives a WebGPU adapter. Stop keeps the picture and the tracer, so Resume continues the same samples.
+ *   - **WebGL** (the fallback): three-gpu-pathtracer 0.0.26 (MIT, its own vendor folder: /assets/vendor/three-gpu-pathtracer/
+ *     <version>/, with three-mesh-bvh), pinned — its WebGL class is deprecated upstream; it retires one release after the WebGPU
+ *     engine passes the bench (owner, 2026-10-20). Imported only when it runs.
+ * Shared like the rest of render/ (canonical in modelcraft/dev, synced into bimcraft/dev).
  *
- *   pathTraceStill(scene, settings, {w, h, onProgress(frac, canvas), signal, seconds}) → Promise<{blob, w, h, passes, ms,
- *                                                                                                  stopped, budget}>
+ *   pathTraceStill(scene, settings, {w, h, onProgress(frac, canvas), signal, seconds, engine?: 'webgpu' | 'webgl'})
+ *     → Promise<{blob, w, h, passes, ms, stopped, budget, engine: 'webgpu' | 'webgl', fallback?: why WebGPU was not used,
+ *                resume?({signal, onProgress, seconds}) → the same shape, release?()}>
+ *     resume/release only when a WebGPU render stopped early (Stop or the time limit): call one of them.
  *   bakeItems(items, planes) → items   every mesh as world-space triangles with the same attributes (position, normal, uv —
  *                                      zeros where a mesh has none: a mix of layouts turns the tracer's picture black), cut by
  *                                      the section planes on the CPU (the path tracer has no clipping planes)
@@ -20,6 +26,13 @@ import * as THREE from 'three';
 import { QUALITY, SKIES, NIGHT, lookFor, farPlane, basis, lampCandela } from './looks.js';
 import { material as libDef } from './materials.js';
 import { libTextures, imageTextureReady } from './three-mats.js';
+import { packScene, setCamera } from './pt-pack.js';
+import { lutFor } from './session.js';
+import { cameraStops, whiteBalance } from './pt-camera.js';
+import { compose, isPlainMix } from './pt-mix.js';
+import { blueNoise } from './pt-sampler.js';
+import { gpuAdapter, createGpuTracer } from './pt-gpu.js';
+import { TEX_SIZE, HW } from './pt-spec.js';
 
 let PT = null;   // the library, once loaded
 async function lib() { PT ||= await import('three-gpu-pathtracer'); return PT; }
@@ -105,7 +118,104 @@ function ptCamera(spec, far) {
   return cam;
 }
 
-export async function pathTraceStill(scene, settings, { w, h, onProgress, signal, seconds = 0 } = {}) {
+/** The WebGPU engine when this browser has it (falls back to WebGL when setting it up fails), else WebGL. */
+export async function pathTraceStill(scene, settings, opts = {}) {
+  let fallback = null;
+  if (opts.engine !== 'webgl') {
+    const adapter = await gpuAdapter();
+    if (adapter) {
+      try { return await gpuTraceStill(scene, settings, { ...opts, adapter }); } catch (e) {
+        if (e.code !== 'gpu_setup' && e.code !== 'no_webgpu') throw e;
+        fallback = String(e.message || e);
+      }
+    } else fallback = 'no-webgpu';
+  }
+  const r = await webglTraceStill(scene, settings, opts);
+  return { ...r, engine: 'webgl', fallback };
+}
+
+/** Imported textures as 512 × 512 layers, rows bottom-up (three.js's flipY for images): Map look key → bytes. */
+export async function imagePixels(scene) {
+  const out = new Map();
+  for (const it of scene.items) {
+    if (!it.look || !it.look.startsWith('img:') || out.has(it.look)) continue;
+    const im = scene.images && scene.images[it.look.slice(4)];
+    const tex = im ? await imageTextureReady(im) : null;
+    if (!tex || !tex.image) { out.set(it.look, null); continue; }
+    const c = document.createElement('canvas');
+    c.width = c.height = TEX_SIZE;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(tex.image, 0, 0, TEX_SIZE, TEX_SIZE);
+    const d = g.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data, px = new Uint8Array(TEX_SIZE * TEX_SIZE * 4), row = TEX_SIZE * 4;
+    for (let y = 0; y < TEX_SIZE; y++) px.set(d.subarray((TEX_SIZE - 1 - y) * row, (TEX_SIZE - y) * row), y * row);
+    for (let i = 3; i < px.length; i += 4) px[i] = 255;
+    out.set(it.look, px);
+    tex.dispose();
+  }
+  return out;
+}
+
+const toBlob = (canvas) => new Promise((res, rej) => canvas.toBlob((bl) => (bl ? res(bl) : rej(new Error('no image'))), 'image/png'));   // i18n-ignore: a media type; never shown
+
+/** RN.1: the WGSL wavefront path tracer (render/pt/). */
+async function gpuTraceStill(scene, settings, { w, h, onProgress, signal, seconds = 0, adapter, hdri = null, camera1 = null, lut = null, volumeData = null }) {
+  const opts = { lut };
+  const t0 = performance.now();
+  w = Math.max(1, Math.round(w)); h = Math.max(1, Math.round(h));
+  const target = QUALITY[settings.quality] || QUALITY.good;
+  const pk = packScene(scene, settings, { w, h, images: await imagePixels(scene), hdri, camera1, volumeData });
+  const ev = cameraStops(settings), wb = whiteBalance(settings.whiteBalance);   // RN.4: exposure in stops, white balance
+  const tracer = await createGpuTracer(pk, { adapter, mask: blueNoise() });
+  if (settings.adaptive && settings.adaptive.on) tracer.setAdaptive(settings.adaptive);   // RN.7: converged pixels get no more samples
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const show = (bytes) => ctx.putImageData(new ImageData(bytes, w, h), 0, 0);
+  let ms = 0;
+  const runFor = async ({ signal: sig, onProgress: prog, seconds: sec = 0 }) => {
+    const start = performance.now();
+    const r = await tracer.run({
+      spp: Math.max(0, target - tracer.samples), deadline: sec > 0 ? start + sec * 1000 : Infinity, signal: sig, exposure: ev, wb, post: settings.post,
+      onPreview: (bytes, ww, hh, n) => { show(bytes); prog?.(Math.min(1, n / target), canvas); },
+    });
+    let layers = null;
+    if (tracer.samples) {
+      // RN.6 / RN.8: the linear picture (and elements / groups) for re-grading and mixing without rendering again
+      const hu = new Uint32Array(pk.header);
+      layers = { w, h, accum: await tracer.accum(), aux: pk.auxStride ? await tracer.aux() : null, stride: pk.auxStride || 0, nElements: hu[HW.ELEMENTS], groups: pk.groups, objOfId: pk.objOfId, twoLevel: pk.twoLevel, exposure: ev, wb };
+      // the finished picture: the GPU's own resolve when only its per-pixel post is used, else the full post (bloom, glare, LUT) and the mix
+      // RN.5: the denoised picture (the network on the GPU, else every core) — the noisy one stays in the layers
+      if (settings.denoise && layers.aux && layers.nElements >= 2) {
+        // (not stopped by the render's own Stop: a stopped picture is denoised too)
+        try { const { denoiseLayers } = await import('./denoise.js'); const d = await denoiseLayers(layers); layers.denoised = d.lin; layers.denoiseEngine = d.engine; }
+        catch (e) { layers.denoiseError = String(e.code || e.message || e); }
+      }
+      const pp = settings.post || {}, needsJs = !!layers.denoised || !!(pp.bloom || pp.glare || (pp.lutName && opts.lut)) || (!!layers.aux && !isPlainMix(settings.mix));
+      show(needsJs ? compose(layers, settings.mix, { exposure: ev, wb, post: pp, lut: opts.lut }) : await tracer.image(ev, wb, pp));
+    }
+    ms += performance.now() - start;
+    const out = { blob: tracer.samples ? await toBlob(canvas) : null, w, h, passes: tracer.samples, ms: Math.round(ms), stopped: r.stopped, budget: r.budget, engine: 'webgpu' };
+    if (layers) out.layers = layers;
+    if (layers && tracer.adaptive()) {
+      // RN.7: how many samples the pixels got, on average and at most (the finish line says so)
+      let sum = 0, mx = 0;
+      for (let i = 0; i < w * h; i++) { const n = layers.accum[i * 4 + 3]; sum += n; if (n > mx) mx = n; }
+      out.adaptive = { converged: !!r.converged, avg: Math.round((sum / (w * h)) * 10) / 10, max: mx };
+    }
+    if ((r.stopped || r.budget) && tracer.samples < target) {
+      out.resume = (o = {}) => runFor(o);
+      out.release = () => tracer.dispose();
+    } else tracer.dispose();
+    return out;
+  };
+  try {
+    ms = performance.now() - t0;   // packing and setting the GPU up count too
+    return await runFor({ signal, onProgress, seconds });
+  } catch (e) { tracer.dispose(); throw e; }
+}
+
+/** The pinned WebGL engine (three-gpu-pathtracer 0.0.26). */
+async function webglTraceStill(scene, settings, { w, h, onProgress, signal, seconds = 0 } = {}) {
   const t0 = performance.now();
   const { WebGLPathTracer, ProceduralEquirectTexture, PhysicalSpotLight, ShapedAreaLight } = await lib();
   w = Math.max(1, Math.round(w)); h = Math.max(1, Math.round(h));
@@ -116,7 +226,7 @@ export async function pathTraceStill(scene, settings, { w, h, onProgress, signal
   renderer.setPixelRatio(1);
   renderer.setSize(w, h, false);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = Math.pow(2, settings.exposure || 0);
+  renderer.toneMappingExposure = Math.pow(2, cameraStops(settings));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   const disposables = [];
   let pt = null, done = 0, stopped = false, budget = false;
@@ -226,3 +336,58 @@ export async function pathTraceStill(scene, settings, { w, h, onProgress, signal
     renderer.forceContextLoss?.();
   }
 }
+
+/**
+ * RN.10: what the render queue (queue.js) calls — a packed scene to a finished picture (the WGSL tracer, its quality's samples,
+ * denoised and graded as the dialog would), a frame's header (its camera and motion blur), frames to a video. A camera-only
+ * animation's frames share one packed scene: the tracer is kept and restarted with each frame's header.
+ */
+export function queueRenderer({ lanDevices = null } = {}) {
+  let cache = null;   // { tris (the packed scene it was made for), tracer }
+  const toPng = (bytes, w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').putImageData(new ImageData(bytes, w, h), 0, 0); return toBlob(c); };
+  return {
+    async packed(pk, settings, { signal = null, onProgress = null } = {}) {
+      const w = pk.w, h = pk.h, target = QUALITY[settings.quality] || QUALITY.good;
+      if (!cache || cache.tris !== pk.tris) {
+        cache?.tracer.dispose();
+        cache = { tris: pk.tris, tracer: await createGpuTracer(pk, { adapter: await gpuAdapter(), mask: blueNoise() }) };
+      } else cache.tracer.restart(pk.header);
+      const tracer = cache.tracer, ev = cameraStops(settings), wb = whiteBalance(settings.whiteBalance);
+      const hu = new Uint32Array(pk.header);
+      // other computers on the network (CU.7, inside Studio): the frame's samples split by speed (compute's hybrid.js); the
+      // picture alone comes back from them (no guides: not denoised then)
+      const lan = lanDevices ? await lanDevices({ W: w, H: h, scene: { kernel: 'pt-ref', params: {}, buffers: (await import('./pt-ref-job.js')).shareable(pk, blueNoise()) } }).catch(() => []) : [];
+      let layers;
+      if (lan.length) {
+        const { createHybrid } = await import('../compute/hybrid.js');
+        const hy = createHybrid({ devices: [{ id: 'gpu', kind: 'gpu', renderRange: (s0, spp, o) => tracer.renderRange(s0, spp, o) }, ...lan], W: w, H: h });
+        await hy.run({ passes: Math.ceil(target / 4), spp: 4, signal, onPass: (acc, n) => onProgress?.(Math.min(1, n / target)) });
+        for (const d of lan) d.release?.();
+        if (signal?.aborted) throw Object.assign(new Error('stopped'), { code: 'cancelled' });
+        layers = { w, h, accum: hy.accum, aux: null, stride: 0, nElements: 0, groups: [], exposure: ev, wb };
+      } else {
+        const r = await tracer.run({ spp: Math.max(0, target - tracer.samples), signal, onPreview: (b, ww, hh, n) => onProgress?.(Math.min(1, n / target)) });
+        if (r.stopped) throw Object.assign(new Error('stopped'), { code: 'cancelled' });
+        layers = { w, h, accum: await tracer.accum(), aux: pk.auxStride ? await tracer.aux() : null, stride: pk.auxStride || 0, nElements: hu[HW.ELEMENTS], groups: pk.groups, exposure: ev, wb };
+      }
+      if (settings.denoise && layers.aux && layers.nElements >= 2) {
+        try { const { denoiseLayers } = await import('./denoise.js'); layers.denoised = (await denoiseLayers(layers)).lin; } catch { /* the noisy picture */ }
+      }
+      const bytes = compose(layers, settings.mix, { exposure: ev, wb, post: settings.post, lut: lutFor(settings) });
+      return { blob: await toPng(bytes, w, h), w, h };
+    },
+    frameHeader(base, fr, settings) { return setCamera(base, fr.camera, settings, { camera1: fr.camera1 }); },
+    async video(blobs, { w, h, fps, format }) {
+      const { createVideoSink } = await import('./video.js');
+      const sink = await createVideoSink({ kind: format, w, h, fps });
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const g = c.getContext('2d');
+      try {
+        for (let i = 0; i < blobs.length; i++) { const bm = await createImageBitmap(blobs[i]); g.drawImage(bm, 0, 0, w, h); bm.close?.(); await sink.add(c, i); }
+        return await sink.finish();
+      } catch (e) { sink.abort(); throw e; }
+    },
+    dispose() { cache?.tracer.dispose(); cache = null; },
+  };
+}
+

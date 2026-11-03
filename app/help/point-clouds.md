@@ -41,3 +41,7 @@ A scan can hold hundreds of millions of points. BimCraft reads every point once 
 :::note
 Files are read on this computer; nothing is uploaded. LAS 1.0–1.4 and LAZ are read (LAZ files up to 1 GB, held in memory while they are read); E57 files up to 6 million points and 512 MB for now (larger scans: export LAS or LAZ); PLY, PCD and PTX in full; text clouds are `x y z`, with color (`r g b`) and intensity columns when they are there.
 :::
+
+## Several scans
+
+Scans taken from different positions can be registered into one frame, refined with ICP and exported as one LAS or E57: see [Register several scans into one](topic:register-scans).

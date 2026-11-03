@@ -24,22 +24,43 @@
  * per system, CadCraft_Pipe / CadCraft_Duct / CadCraft_MepFitting / CadCraft_Valve, and for segments Pset_PipeSegmentTypeCommon
  * (pipes) and Qto_PipeSegmentBaseQuantities / Qto_DuctSegmentBaseQuantities.
  * Slope (drains): a run falls by `slope` (rise per run) along its horizontal length from its first point; sanitary and
- * storm systems start at the International Plumbing Code minimum for the size (tables.js minDrainSlope).
+ * storm systems start at the smallest slope their standard allows the size (mep/pipes.js drainSlope: the International
+ * Plumbing Code for the US tables, NBR 8160 for the Brazilian ones).
+ * Pipes come from mep/pipes.js: the US tables, or the Brazilian ones (PVC soldável, PVC esgoto) named by DN.
  *
  *   PIPE_SYSTEMS, DUCT_SYSTEMS, VALVE_KINDS, RUN_PSET
  *   sectionOf(run) → { kind, round, od, wall, w, h, shape, label } | null      runVertices(run) → [[x, y, z]] (slope applied)
  *   mepLayout(runs) → { runs: Map(guid → { parts }), error? }   pure: what the runs make (parts with their ends)
  *   readRuns(w) · placeRun(spec) → op · changeRun(guid, ch) → op · removeRuns(guids) → op · addValve(guid, at, kind) → op
  *   regenMep(w, storey) · runSchedules(w) → { pipes, ducts, fittings } rows · pipeForFlow(mat, cls, q, vmax) · ductForFlow(…)
+ *   drainPlan(w) → Map(guid → { id, std, units, floor, size, need, grow, toobig })   sanitary runs by the fixture units they carry
+ *     (mep/drainage.js: UHC of NBR 8160 for the Brazilian pipes, DFU of the IPC for the others), each run's `role` (branch | main,
+ *     CadCraft_MepRun DrainRole) choosing the table; need = the smallest size that carries them. sizeDrains() → op: every
+ *     sanitary run smaller than it needs made that size (never smaller than drawn), one undo step.
+ *   readFixturePorts(w) → [{ id, owner, storey, p, dir, domain, system, size, flow, fixture, connected }]   the ports families wrote on
+ *     their elements (CadCraft_Connector; family-ops.js), in their storey's plan mm. A run whose end lies on one (within 0.6 mm)
+ *     is connected to it when the run is made; joinPorts(w, storey, ports) connects new ports to touching free ones.
  *   Errors: mep.err.points, mep.err.size, mep.err.back (a run doubling back on itself), mep.err.short (a leg too short for its
  *   fittings), mep.err.valve, mep.err.none.
+ * 0.7 LC.9 (session `mep-07`): a run's end may be FIXED to a port of a piece of equipment (mep/equipment.js): `ends` = [start, end],
+ * each null or { eq: equipment GlobalId, port: port name }, kept in CadCraft_MepRun.Ends. regenMep puts a fixed end where that port
+ * now is (so a run follows the equipment it starts or ends on, and an edit to the run keeps that end on the port) and connects
+ * the run's end port to the equipment's (IfcRelConnectsPorts). systemForKey(w, kind, key) is the system equipment joins.
+ * Steel runs may be cut into spools (mep/spools.js): `spoolMax` (mm, 0 = not spooled), `fieldWelds` (mm along the drawn line),
+ * `line` (its line number); mepLayout takes `weldCuts` (mm along the drawn line) and cuts straight pipe there, and regenMep writes
+ * each part's CadCraft_Spool.
  */
 import { op } from './model-ops.js';
 import { ids, val } from './ifc-util.js';
 import { round } from './model-write.js';
 import { t as tr } from './i18n.js';
-import { pipeSize, bendRadius, minDrainSlope, DEFAULT_CLASS, sizesFor } from './mep/tables.js';
+import { pipeSize, bendRadius, drainSlope, DEFAULT_CLASS, sizesFor, SYSTEM_MATERIALS, standardOf, projectStandard } from './mep/pipes.js';
 import { sizeSection, sectionLoss } from './mep/sizing.js';
+import { readEquipment, portsAt, portsOfElement, PORT_PSET } from './mep/equipment.js';   // 0.7 LC.9 (mep-07): runs fixed to equipment ports
+import { readPorts } from './mep/ports.js';
+import { spooled, planSpools, assignSpools, SPOOL_PSET } from './mep/spools.js';   // 0.7 LC.9 (mep-07): steel spools
+import { CONNECTOR_PSET } from './family-model.js';
+import { drainNetwork, smallestSize, upstreamFirst, MAIN_MIN_DN } from './mep/drainage.js';
 
 export const RUN_PSET = 'CadCraft_MepRun';
 const SYS_PSET = 'CadCraft_MepSystem';
@@ -56,13 +77,22 @@ export const PIPE_SYSTEMS = {
   hhw: { ifc: 'HEATING', token: '--layer-magenta', rgb: [0.76, 0.15, 0.36], mat: 'steel' },
   gas: { ifc: 'GAS', token: '--layer-ochre', rgb: [0.98, 0.69, 0.02], mat: 'steel' },
   fire: { ifc: 'FIREPROTECTION', token: '--layer-red', rgb: [0.85, 0.28, 0.06], mat: 'steel' },
+  // 0.8 SU.888 (sx-mep): split / VRF refrigerant lines (ACR tube by OD, mep/tables-acr.js) and condensate drains
+  refl: { ifc: 'REFRIGERATION', token: '--layer-green', rgb: [0.18, 0.62, 0.35], mat: 'acr' },
+  refg: { ifc: 'REFRIGERATION', token: '--layer-cyan', rgb: [0.42, 0.75, 0.88], mat: 'acr' },
+  cond: { ifc: 'DRAINAGE', token: '--ink-2', rgb: [0.45, 0.48, 0.52], mat: 'pvc', drain: true },
 };
 export const DUCT_SYSTEMS = {
   supply: { ifc: 'AIRCONDITIONING', token: '--layer-blue', rgb: [0.11, 0.49, 0.84] },
   return: { ifc: 'VENTILATION', token: '--layer-green', rgb: [0.22, 0.70, 0.29] },
   exhaust: { ifc: 'EXHAUST', token: '--layer-orange', rgb: [0.96, 0.62, 0.0] },
   outside: { ifc: 'VENTILATION', token: '--layer-cyan', rgb: [0.08, 0.67, 0.75] },
+  // 0.8 EG.2 (mep_PART_2): cable trays and conduits are drawn as runs of these two systems (IfcCableCarrierSegment / fitting, carrier ports)
+  tray: { ifc: 'ELECTRICAL', token: '--layer-orange', rgb: [0.93, 0.55, 0.12], carrier: 'tray' },
+  conduit: { ifc: 'ELECTRICAL', token: '--layer-ochre', rgb: [0.80, 0.62, 0.10], carrier: 'conduit' },
 };
+/** 'tray' | 'conduit' for a run of a cable-carrier system, else null. */
+export const carrierOf = (r) => (r && r.kind === 'duct' ? DUCT_SYSTEMS[r.system]?.carrier || null : null);
 export const VALVE_KINDS = { gate: 'ISOLATING', ball: 'ISOLATING', globe: 'REGULATING', check: 'CHECK' };
 export const DUCT_SHAPES = ['round', 'rect', 'oval'];
 const refuse = (key) => { throw Object.assign(new Error(key), { key }); };
@@ -84,10 +114,11 @@ export function sectionOf(r) {
   if (r.kind === 'pipe') {
     const p = pipeSize(r.mat, r.cls, r.size);
     if (!p) return null;
-    return { kind: 'pipe', round: true, shape: 'round', od: p.od * IN, wall: p.wall * IN, id: p.id * IN, nps: p.nps, w: p.od * IN, h: p.od * IN, R: bendRadius(p) * IN, label: p.size + '"', p };
+    return { kind: 'pipe', round: true, shape: 'round', od: p.od * IN, wall: p.wall * IN, id: p.id * IN, nps: p.nps, w: p.od * IN, h: p.od * IN, R: bendRadius(p) * IN, label: p.label || p.size + '"', p };
   }
   const w = Number(r.w), h = r.shape === 'round' ? w : Number(r.h);
-  if (!(w >= 50) || !(h >= 50) || !DUCT_SHAPES.includes(r.shape)) return null;
+  const minDim = carrierOf(r) ? 10 : 50;   // a conduit is narrower than a duct
+  if (!(w >= minDim) || !(h >= minDim) || !DUCT_SHAPES.includes(r.shape)) return null;
   if (r.shape === 'oval' && !(w > h)) return null;
   return { kind: 'duct', round: r.shape === 'round', shape: r.shape, od: r.shape === 'round' ? w : null, w, h, label: r.shape === 'round' ? 'Ø' + Math.round(w) : Math.round(w) + '×' + Math.round(h) };   // i18n-ignore: size marks
 }
@@ -210,6 +241,12 @@ export function mepLayout(runs) {
     t.branch.trim[legB][t.e === 1 ? 1 : 0] += mb;
     t.bd = norm(sub(t.e === 1 ? t.branch.verts[t.branch.verts.length - 2] : t.branch.verts[1], t.at));   // from the joint out along the branch
   }
+  // 0.7: welds that cut straight pipe (spools), by distance along the run
+  for (const r of R) for (const s of r.weldCuts || []) {
+    let x = s, i = 0;
+    while (i < r.legs.length && x > r.legs[i].L) { x -= r.legs[i].L; i++; }
+    if (i < r.legs.length) r.cuts[i].push({ s: x, half: 0, kind: 'weld' });
+  }
   // valves on pipes, by distance along the run
   for (const r of R) for (const v of r.valves || []) {
     if (r.kind !== 'pipe') return fail('mep.err.valve');
@@ -235,6 +272,7 @@ export function mepLayout(runs) {
         const s1 = c.s - c.half;
         if (s1 - s0 < 1) return fail('mep.err.short');
         push({ kind: 'segment', a: add(l.a, mul(l.d, s0)), b: add(l.a, mul(l.d, s1)), d: l.d, wd });
+        if (c.kind === 'weld') { s0 = c.s; continue; }
         const a = add(l.a, mul(l.d, c.s - c.half)), b = add(l.a, mul(l.d, c.s + c.half));
         if (c.kind === 'tee') push({ kind: 'tee', at: c.tee.at, d: l.d, bd: c.tee.bd, m: c.m, mb: c.mb, wd, branchGuid: c.tee.branch.guid, branchSec: c.tee.branch.sec, a, b });
         else push({ kind: 'valve', a, b, d: l.d, wd, valve: c.valve });
@@ -268,6 +306,8 @@ function aggKids(w, id) {
 }
 /** Points (and valves) from the file: untrusted JSON, checked. */
 function readJson(s, fallback) { try { const v = JSON.parse(String(s || '')); return v ?? fallback; } catch (e) { return fallback; } }
+/** [start, end] fixings: { eq, port } (short text) or null each. */
+const okEnds = (e) => (Array.isArray(e) && e.length === 2 ? e.map((x) => (x && typeof x.eq === 'string' && typeof x.port === 'string' && x.eq.length <= 64 && x.port.length <= 60 ? { eq: x.eq, port: x.port } : null)) : [null, null]);
 const okPoints = (p) => Array.isArray(p) && p.length >= 2 && p.length <= 500 && p.every((q) => Array.isArray(q) && q.length >= 2 && q.slice(0, 3).every((x) => Number.isFinite(x) && Math.abs(x) < 1e8));
 export function readRuns(w) {
   const out = [];
@@ -285,7 +325,12 @@ export function readRuns(w) {
       id, guid: val(w.api.GetLine(w.mid, id, false).GlobalId), storey: so.get(id), kind, system: String(ps.System || (kind === 'pipe' ? 'cw' : 'supply')),
       points: points.map((q) => [q[0], q[1], q[2] || 0]), mat: String(ps.Material || ''), cls: String(ps.Class || ''), size: String(ps.Size || ''),
       shape: DUCT_SHAPES.includes(ps.Shape) ? ps.Shape : 'rect', w: mmOf(w, ps.Width), h: mmOf(w, ps.Height), slope: Number(ps.Slope) || 0, flow: Number(ps.Flow) || 0,
+      role: ps.DrainRole === 'main' ? 'main' : 'branch',
       valves: Array.isArray(valves) ? valves.filter((v) => v && Number.isFinite(v.s) && VALVE_KINDS[v.kind]).map((v) => ({ s: v.s, kind: v.kind })) : [],
+      ends: okEnds(readJson(ps.Ends, null)),
+      insulation: Math.max(0, mmOf(w, ps.Insulation)),   // 0.7 LC.9: insulation thickness (mm), for the soft clearance and openings
+      spoolMax: Math.max(0, Number(ps.SpoolMaxMm) || 0), line: String(ps.Line || ''),
+      fieldWelds: (() => { const f = readJson(ps.FieldWelds, []); return Array.isArray(f) ? f.filter((s) => Number.isFinite(s) && s >= 0 && s < 1e8).slice(0, 500) : []; })(),
       parts: aggKids(w, id),
     });
   }
@@ -301,7 +346,10 @@ function writeDef(w, id, r) {
   w.upsertPset(id, RUN_PSET, [['Kind', 'IFCLABEL', r.kind], ['System', 'IFCLABEL', r.system], ['PointsMm', 'IFCTEXT', JSON.stringify(r.points.map((q) => q.map((x) => round(x, 3))))],
     ['Material', 'IFCLABEL', r.mat || ''], ['Class', 'IFCLABEL', r.cls || ''], ['Size', 'IFCLABEL', r.size || ''], ['Shape', 'IFCLABEL', r.kind === 'duct' ? r.shape : ''],
     Lm('Width', r.kind === 'duct' ? r.w : 0), Lm('Height', r.kind === 'duct' ? r.h : 0), ['Slope', 'IFCREAL', round(r.slope || 0, 9)], ['Flow', 'IFCREAL', round(r.flow || 0, 6)],
-    ['Valves', 'IFCTEXT', JSON.stringify((r.valves || []).map((v) => ({ s: round(v.s, 3), kind: v.kind })))]]);
+    ['Valves', 'IFCTEXT', JSON.stringify((r.valves || []).map((v) => ({ s: round(v.s, 3), kind: v.kind })))],
+    ['Ends', 'IFCTEXT', JSON.stringify(okEnds(r.ends || [null, null]))], Lm('Insulation', Math.max(0, Number(r.insulation) || 0)),
+    ['SpoolMaxMm', 'IFCREAL', round(Math.max(0, Number(r.spoolMax) || 0), 3)], ['FieldWelds', 'IFCTEXT', JSON.stringify((r.fieldWelds || []).map((s) => round(s, 3)))], ['Line', 'IFCLABEL', String(r.line || '').slice(0, 20)],
+    ['DrainRole', 'IFCLABEL', r.role === 'main' ? 'main' : 'branch']]);
 }
 /** Plane angles in the file's own unit (radians unless the project says degrees). */
 function angleUnit(w) {
@@ -395,7 +443,7 @@ function loft(w, part, A, B) {
   return w.make('IFCFACETEDBREP', w.H(w.make('IFCCLOSEDSHELL', faces)));
 }
 
-const MAT_NAMES = { steel: 'mep.mat.steel', copper: 'mep.mat.copper', pvc: 'mep.mat.pvc', pex: 'mep.mat.pex' };
+const MAT_NAMES = { steel: 'mep.mat.steel', copper: 'mep.mat.copper', pvc: 'mep.mat.pvc', pex: 'mep.mat.pex', 'pvc-sold': 'mep.mat.pvc-sold', 'pvc-esg': 'mep.mat.pvc-esg' };
 const sysOf = (r) => (r.kind === 'pipe' ? PIPE_SYSTEMS[r.system] : DUCT_SYSTEMS[r.system]) || (r.kind === 'pipe' ? PIPE_SYSTEMS.cw : DUCT_SYSTEMS.supply);
 export const systemLabel = (kind, key) => tr('mep.sys.' + (kind === 'pipe' ? (PIPE_SYSTEMS[key] ? key : 'cw') : (DUCT_SYSTEMS[key] ? key : 'supply')));
 function typeOf(w, cls, name, predefined) {
@@ -428,6 +476,10 @@ function systemFor(w, r) {
   w._mepSys.set(key, id);
   return id;
 }
+/** The system a part or a piece of equipment of this kind (pipe | duct) and key joins. */
+export const systemForKey = (w, kind, system) => systemFor(w, { kind, system });
+/** Elements into a system (IFC4: an assignment of their own; IFC2X3: the system's one assignment, extended). */
+export const assignToSystem = (w, sys, elements) => assign(w, sys, elements);
 function assign(w, sys, parts) {
   if (!parts.length) return;
   // IFC4 lets a system have several assignments: each write gets its own (Live: no two people write one line); IFC2X3 one
@@ -459,15 +511,18 @@ const PART_CLASS = {
   pipe: { segment: ['IFCPIPESEGMENT', 'RIGIDSEGMENT', 'IFCPIPESEGMENTTYPE'], bend: ['IFCPIPEFITTING', 'BEND', 'IFCPIPEFITTINGTYPE'], tee: ['IFCPIPEFITTING', 'JUNCTION', 'IFCPIPEFITTINGTYPE'], reducer: ['IFCPIPEFITTING', 'TRANSITION', 'IFCPIPEFITTINGTYPE'], valve: ['IFCVALVE', null, 'IFCVALVETYPE'] },
   duct: { segment: ['IFCDUCTSEGMENT', 'RIGIDSEGMENT', 'IFCDUCTSEGMENTTYPE'], bend: ['IFCDUCTFITTING', 'BEND', 'IFCDUCTFITTINGTYPE'], tee: ['IFCDUCTFITTING', 'JUNCTION', 'IFCDUCTFITTINGTYPE'], reducer: ['IFCDUCTFITTING', 'TRANSITION', 'IFCDUCTFITTINGTYPE'] },
 };
+const CARRIER_CLASS = (pre) => ({ segment: ['IFCCABLECARRIERSEGMENT', pre, 'IFCCABLECARRIERSEGMENTTYPE'], bend: ['IFCCABLECARRIERFITTING', 'BEND', 'IFCCABLECARRIERFITTINGTYPE'], tee: ['IFCCABLECARRIERFITTING', 'JUNCTION', 'IFCCABLECARRIERFITTINGTYPE'], reducer: ['IFCCABLECARRIERFITTING', 'TRANSITION', 'IFCCABLECARRIERFITTINGTYPE'] });
+PART_CLASS.tray = CARRIER_CLASS('CABLETRAYSEGMENT');
+PART_CLASS.conduit = CARRIER_CLASS('CONDUITSEGMENT');
 const X3_CLASS = { segment: 'IFCFLOWSEGMENT', bend: 'IFCFLOWFITTING', tee: 'IFCFLOWFITTING', reducer: 'IFCFLOWFITTING', valve: 'IFCFLOWCONTROLLER' };
 
 /** One part: the element, its shape, type, material, colour, sets and ports (returned for connecting). */
 function writePart(w, r, sec, part, lp) {
-  const [cls4, pre, tcls] = PART_CLASS[r.kind][part.kind];
+  const [cls4, pre, tcls] = PART_CLASS[carrierOf(r) || r.kind][part.kind];
   const predefined = part.kind === 'valve' ? VALVE_KINDS[part.valve.kind] : pre;
   const sysName = systemLabel(r.kind, r.system);
   const sizeText = part.kind === 'tee' && !sameSec(sec, part.branchSec) ? sec.label + ' × ' + part.branchSec.label : part.kind === 'reducer' ? part.from.label + ' × ' + part.to.label : sec.label;
-  const what = part.kind === 'segment' ? tr(r.kind === 'pipe' ? 'mep.part.pipe' : 'mep.part.duct') : part.kind === 'valve' ? tr('mep.valve.' + part.valve.kind) : tr('mep.fit.' + part.kind + (r.kind === 'duct' && part.kind === 'reducer' ? '.duct' : ''));
+  const what = part.kind === 'segment' ? tr(r.kind === 'pipe' ? 'mep.part.pipe' : carrierOf(r) ? 'mep.part.' + carrierOf(r) : 'mep.part.duct') : part.kind === 'valve' ? tr('mep.valve.' + part.valve.kind) : tr('mep.fit.' + part.kind + (r.kind === 'duct' && part.kind === 'reducer' ? '.duct' : ''));
   const name = w.L(what + ' ' + sizeText + ' ' + sysName);
   const place = w.H(w.placeAt(lp, 0, 0, 0, 0));
   const objType = part.kind === 'valve' ? w.L(tr('mep.valve.' + part.valve.kind)) : null;
@@ -479,7 +534,7 @@ function writePart(w, r, sec, part, lp) {
   const S = sysOf(r), style = w.surfaceStyle('CadCraft MEP ' + r.kind + ' ' + r.system, S.rgb);
   for (const it of body.items) w.styleItem(it, style);
   // type: segments by material and class (or duct shape), fittings and valves by kind
-  const tname = part.kind === 'segment' ? (r.kind === 'pipe' ? tr('mep.type.pipe', { cls: tr('mep.cls.' + (MAT_NAMES[r.mat] ? r.mat : 'steel'), { c: r.cls }) }) : tr('mep.type.duct.' + sec.shape)) : what;
+  const tname = part.kind === 'segment' ? (r.kind === 'pipe' ? tr('mep.type.pipe', { cls: tr('mep.cls.' + (MAT_NAMES[r.mat] ? r.mat : 'steel'), { c: r.cls }) }) : (carrierOf(r) ? tr('mep.part.' + carrierOf(r)) : tr('mep.type.duct.' + sec.shape))) : what;
   w.relateType(id, typeOf(w, tcls, tname, predefined));
   w.associateMaterial(id, w.material(r.kind === 'pipe' ? tr(MAT_NAMES[r.mat] || 'mep.mat.steel') : tr('mep.mat.galv')));
   const run = w.guidOf(r.id), Lm = (k, v) => [k, 'IFCLENGTHMEASURE', round(w.u(v))];
@@ -504,7 +559,7 @@ function writePart(w, r, sec, part, lp) {
   const S2 = sysOf(r), myLp = w.api.GetLine(w.mid, id, false).ObjectPlacement.value, made = [];
   for (const pt of part.ports) {
     const plp = w.make('IFCLOCALPLACEMENT', w.H(myLp), w.H(w.axisFrame(pt.p, pt.out, perp(pt.out))));
-    const pid = w.v4 ? w.make('IFCDISTRIBUTIONPORT', w.guid(), w.ownerHistory(), w.L(tr('mep.port')), null, null, w.H(plp), null, pt.flow, r.kind === 'pipe' ? 'PIPE' : 'DUCT', S2.ifc)
+    const pid = w.v4 ? w.make('IFCDISTRIBUTIONPORT', w.guid(), w.ownerHistory(), w.L(tr('mep.port')), null, null, w.H(plp), null, pt.flow, r.kind === 'pipe' ? 'PIPE' : carrierOf(r) ? 'CABLECARRIER' : 'DUCT', S2.ifc)
       : w.make('IFCDISTRIBUTIONPORT', w.guid(), w.ownerHistory(), w.L(tr('mep.port')), null, null, w.H(plp), null, pt.flow);
     if (!w.v4) w.make('IFCRELCONNECTSPORTTOELEMENT', w.guid(), w.ownerHistory(), null, null, w.H(pid), w.H(id));
     made.push({ id: pid, p: pt.p, part: id });
@@ -517,9 +572,46 @@ const sameSec = (a, b) => a.shape === b.shape && Math.abs(a.w - b.w) < 0.5 && Ma
 /** Every run of a level made again: the old parts and ports go, the layout is written, touching ports connected. */
 export function regenMep(w, storey) {
   const runs = readRuns(w).filter((r) => r.storey === storey);
-  if (!runs.length) { dropEmptySystems(w); return 0; }
-  const L = mepLayout(runs.map((r) => ({ ...r, sec: sectionOf(r), verts: runVertices(r) })));
+  // 0.7: equipment on this level and where its ports are now; fixed run ends go there
+  const eqs = readEquipment(w).filter((e) => e.storey === storey);
+  const eqPorts = new Map();
+  for (const e of eqs) for (const p of portsAt(e)) eqPorts.set(e.guid + '#' + p.name, p);
+  for (const r of runs) {
+    let moved = false;
+    r.ends.forEach((f, k) => {
+      const p = f && eqPorts.get(f.eq + '#' + f.port);
+      if (!p) return;
+      const i = k ? r.points.length - 1 : 0, q = r.points[i];
+      if (dist(q, p.at) > 0.05) { r.points[i] = p.at.map((x) => round(x, 3)); moved = true; }
+    });
+    if (moved) writeDef(w, r.id, r);
+  }
+  const fresh = [];
+  let n = 0;
+  if (runs.length) n = writeChanged(w, storey, runs, fresh);
+  else dropEmptySystems(w);
+  connectPorts(w, storey, runs, eqs, fresh);
+  if (runs.length) dropEmptySystems(w);
+  return n;
+}
+/** The runs whose parts come out differently, written again (their new ports pushed to `fresh`). → how many. */
+/**
+ * The layout of one level's runs as regenMep writes it (0.7: spooled steel runs are planned first — where their straight pipe is
+ * cut and their spools break, set on each run as weldCuts / breaks — then laid out again with the cuts). Refuses on a layout error.
+ */
+export function planLayout(runs) {
+  const prep = () => runs.map((r) => ({ ...r, sec: sectionOf(r), verts: runVertices(r) }));
+  let L = mepLayout(prep());
   if (L.error) refuse(L.error);
+  if (runs.some(spooled)) {
+    for (const r of runs) if (spooled(r) && L.runs.get(r.guid)) { const pl = planSpools({ ...r, verts: runVertices(r) }, L.runs.get(r.guid).parts); r.weldCuts = pl.cuts; r.breaks = pl.breaks; }
+    L = mepLayout(prep());
+    if (L.error) refuse(L.error);
+  }
+  return L;
+}
+function writeChanged(w, storey, runs, fresh) {
+  const L = planLayout(runs);
   // only runs whose parts come out differently are written again: the others keep their lines (Live: an edit to one run
   // never writes over what someone else drew, so their undo still works), and parts keep their ids
   const fpOf = (r) => fingerprint(r, L.runs.get(r.guid));
@@ -528,7 +620,7 @@ export function regenMep(w, storey) {
   const oldParts = changed.flatMap((r) => r.parts);
   if (oldParts.length) w.dropProduct([...oldParts, ...portsOfParts(w, oldParts)]);
   const lp = w.api.GetLine(w.mid, storey, false).ObjectPlacement.value;
-  const fresh = [], bySys = new Map();
+  const bySys = new Map();
   for (const r of changed) {
     const sec = sectionOf(r), lay = L.runs.get(r.guid);
     if (!sec || !lay) continue;
@@ -540,6 +632,10 @@ export function regenMep(w, storey) {
       if (part.kind === 'segment') length += dist(part.a, part.b);
     }
     if (kids.length) w.make('IFCRELAGGREGATES', w.guid(), w.ownerHistory(), null, null, w.H(r.id), kids.map((k) => w.H(k)));
+    if (spooled(r)) for (const sp of assignSpools({ ...r, verts: runVertices(r) }, lay.parts, r.breaks || [])) for (const i of sp.parts) {
+      const pp = lay.parts[i], s = sp.s0;
+      w.upsertPset(kids[i], SPOOL_PSET, [['SpoolId', 'IFCLABEL', sp.id], ['Run', 'IFCLABEL', r.guid], ['Index', 'IFCINTEGER', sp.index], ['StartMm', 'IFCREAL', round(s, 3)], ['EndMm', 'IFCREAL', round(sp.s1, 3)], ['Part', 'IFCLABEL', pp.kind]]);
+    }
     w.upsertQto(r.id, 'Qto_CadCraftMepRun', [['Length', 'length', length], ['Parts', 'count', kids.length]]);
     w.upsertPset(r.id, RUN_PSET, [['Layout', 'IFCLABEL', fpOf(r)]]);
     const sys = systemFor(w, r);
@@ -547,14 +643,42 @@ export function regenMep(w, storey) {
     bySys.get(sys).push(...kids);
   }
   for (const [sys, parts] of bySys) assign(w, sys, parts);
-  // ports that touch, of different parts, are connected once: new ports with new ones, and with the kept runs' free ports
-  const keptParts = runs.filter((r) => !changed.includes(r)).flatMap((r) => r.parts);
+  return changed.length;
+}
+/**
+ * Ports that touch, of different parts, are connected once: the runs' new ports and the equipment's free ports look for a free
+ * port within 0.6 mm among the new ones, the kept runs' free ports and the equipment's.
+ */
+function connectPorts(w, storey, runs, eqs, fresh) {
   const joined = connectedPorts(w);
-  const kept = portsOfParts(w, keptParts).filter((id) => !joined.has(id)).map((id) => ({ id, p: portAt(w, id), part: portOwner(w, id) })).filter((q) => q.p);
-  const all = [...fresh, ...kept];
+  const freshIds = new Set(fresh.map((p) => p.id));
+  const keptParts = runs.flatMap((r) => r.parts);
+  const kept = portsOfParts(w, keptParts).filter((id) => !joined.has(id) && !freshIds.has(id)).map((id) => ({ id, p: portAt(w, id), part: portOwner(w, id) })).filter((q) => q.p);
+  const eqFree = [];
+  for (const e of eqs) {
+    const at = new Map(portsAt(e).map((p) => [p.name, p.at]));
+    for (const pid of portsOfElement(w, e.id)) {
+      if (joined.has(pid)) continue;
+      const nm = w.readPset(pid, PORT_PSET)?.PortName;
+      if (at.has(nm)) eqFree.push({ id: pid, p: at.get(nm), part: e.id });
+    }
+  }
+  // other elements' free ports with a CadCraft_Port set (an add-on's equipment written with api.mep.addPorts), from their placements
+  const mine = new Set(eqs.map((e) => e.id));
+  if (fresh.length) for (const p of readPorts(w)) if (p.role === 'equipment' && !p.connectedTo && p.storey === storey && !mine.has(p.owner) && p.at) eqFree.push({ id: p.id, p: p.at, part: p.owner });
+  // and the free ports of elements placed from families (a basin's drain, a fan's outlet: renanem's connectors)
+  const fixtures = readFixturePorts(w).filter((q) => q.storey === storey && !q.connected).map((q) => ({ id: q.id, p: q.p, part: q.owner }));
+  const seekers = [...fresh, ...eqFree];
+  if (!seekers.length) return;
+  linkTouching(w, seekers, [...kept, ...fixtures]);
+}
+/** Connect each of `fresh` to a port of another part within 0.6 mm (among `fresh` and `others`), each port once. */
+function linkTouching(w, fresh, others) {
+  const all = [...fresh, ...others];
   const grid = new Map(), cell = (p) => p.map((x) => Math.round(x)).join(',');
   for (const p of all) { const k = cell(p.p); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(p); }
   const done = new Set();
+  let n = 0;
   for (const p of fresh) {
     if (done.has(p.id)) continue;
     const near = [];
@@ -564,14 +688,50 @@ export function regenMep(w, storey) {
     if (!q) continue;
     w.make('IFCRELCONNECTSPORTS', w.guid(), w.ownerHistory(), null, null, w.H(p.id), w.H(q.id), null);
     done.add(p.id); done.add(q.id);
+    n++;
   }
-  dropEmptySystems(w);
-  return changed.length;
+  return n;
+}
+/** New ports of an element (ids) connected to the free run ports and element ports of its storey that they touch. */
+export function joinPorts(w, storey, portIds) {
+  if (!portIds.length) return 0;
+  const lp = w.api.GetLine(w.mid, storey, false).ObjectPlacement.value;
+  const fresh = portIds.map((id) => ({ id, p: placeIn(w, lp, id).p, part: portOwner(w, id) }));
+  const joined = connectedPorts(w), mine = new Set(portIds);
+  const parts = readRuns(w).filter((r) => r.storey === storey).flatMap((r) => r.parts);
+  const others = [...portsOfParts(w, parts).filter((id) => !joined.has(id)).map((id) => ({ id, p: portAt(w, id), part: portOwner(w, id) })).filter((q) => q.p),
+    ...readFixturePorts(w).filter((q) => q.storey === storey && !q.connected && !mine.has(q.id)).map((q) => ({ id: q.id, p: q.p, part: q.owner }))];
+  return linkTouching(w, fresh, others);
+}
+/** A port's origin and its Z axis (the way out) in the axes of placement `lp` (mm). */
+function placeIn(w, lp, id) {
+  const M = w.relMatrix(lp, w.api.GetLine(w.mid, id, false).ObjectPlacement.value);
+  return { p: [M[12], M[13], M[14]], dir: [M[8], M[9], M[10]] };
+}
+export function readFixturePorts(w) {
+  const owner = new Map();
+  try { for (const rid of ids(w.api, w.mid, 'IFCRELNESTS')) { const r = w.api.GetLine(w.mid, rid, false); for (const h of r.RelatedObjects || []) owner.set(h.value, r.RelatingObject?.value); } } catch (e) { /* none */ }
+  try { for (const rid of ids(w.api, w.mid, 'IFCRELCONNECTSPORTTOELEMENT')) { const r = w.api.GetLine(w.mid, rid, false); if (r.RelatingPort) owner.set(r.RelatingPort.value, r.RelatedElement?.value); } } catch (e) { /* IFC4 files may have none */ }
+  let list = [];
+  try { list = ids(w.api, w.mid, 'IFCDISTRIBUTIONPORT'); } catch (e) { return []; }
+  const so = w.storeyOf(), joined = connectedPorts(w), out = [];
+  for (const id of list) {
+    const ps = w.readPset(id, CONNECTOR_PSET), el = owner.get(id);
+    if (!ps || !el) continue;
+    const storey = so.get(el);
+    const st = storey ? w.api.GetLine(w.mid, storey, false) : null;
+    if (!st?.ObjectPlacement) continue;
+    const at = placeIn(w, st.ObjectPlacement.value, id);
+    out.push({ id, owner: el, storey, p: at.p, dir: at.dir, domain: ps.Domain === 'duct' ? 'duct' : 'pipe', system: String(ps.System || ''), size: (Number(ps.Size) || 0) * w.unitMm,
+      flow: ps.Flow === 'out' ? 'out' : 'in', key: String(ps.Key || ''), fixture: String(ps.Fixture || ''), connected: joined.has(id) });
+  }
+  return out;
 }
 /** What a run's parts come out as (and what they are made of), as a short hash: unchanged = nothing to write. */
 function fingerprint(r, lay) {
   const R3 = (q) => q.map((x) => Math.round(x * 10) / 10);
   const s = JSON.stringify([r.kind, r.system, r.mat, r.cls, r.size, r.shape, Math.round(r.w), Math.round(r.h), round(r.slope || 0, 9), r.flow || 0, r.valves,
+    ...(spooled(r) ? [r.spoolMax, r.line, (r.breaks || []).map((b) => [Math.round(b.s * 10), b.kind])] : []),
     (lay?.parts || []).map((p) => [p.kind, ...(p.ports || []).map((q) => R3(q.p)), p.kind === 'tee' ? p.branchSec?.label : p.kind === 'reducer' ? [p.from.label, p.to.label] : p.valve?.kind || ''])]);
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
@@ -597,19 +757,20 @@ function portOwner(w, id) {
   return null;
 }
 
-/** A run's defaults: material and class from the system, the drain slope from the plumbing code's table. */
-export function runDefaults(kind, system, size) {
+/** A run's defaults: material and class from the system under a standard ('us' or 'br'), the drain slope from its code. */
+export function runDefaults(kind, system, size, std = projectStandard() || 'us') {   // 0.8 SU.955: the project's plumbing standard
   if (kind === 'duct') return { kind, system: DUCT_SYSTEMS[system] ? system : 'supply', shape: 'rect', w: 300, h: 200, slope: 0 };
-  const S = PIPE_SYSTEMS[system] || PIPE_SYSTEMS.cw, mat = S.mat, cls = DEFAULT_CLASS[mat];
-  const sizes = sizesFor(mat, cls), sz = sizes.includes(size) ? size : (sizes.includes(S.drain ? '3' : '3/4') ? (S.drain ? '3' : '3/4') : sizes[0]);
+  const key = PIPE_SYSTEMS[system] ? system : 'cw', S = PIPE_SYSTEMS[key];
+  const mat = (SYSTEM_MATERIALS[std] || SYSTEM_MATERIALS.us)[key] || S.mat, cls = DEFAULT_CLASS[mat];
+  const usual = mat === 'pvc-esg' ? '100' : mat === 'pvc-sold' ? '25' : S.drain ? '3' : '3/4';
+  const sizes = sizesFor(mat, cls), sz = sizes.includes(size) ? size : (sizes.includes(usual) ? usual : sizes[0]);
   const p = pipeSize(mat, cls, sz);
-  return { kind, system: PIPE_SYSTEMS[system] ? system : 'cw', mat, cls, size: sz, slope: S.drain && p ? minDrainSlope(p.nps) : 0 };
+  return { kind, system: key, mat, cls, size: sz, slope: S.drain && p ? drainSlope(p) : 0 };
 }
-/** The smallest drain slope the plumbing code allows this run (null when it is not a drain). */
+/** The smallest drain slope the run's code allows it (null when it is not a drain). */
 export function drainMinimum(r) {
   if (r.kind !== 'pipe' || !PIPE_SYSTEMS[r.system]?.drain) return null;
-  const p = pipeSize(r.mat, r.cls, r.size);
-  return p ? minDrainSlope(p.nps) : null;
+  return drainSlope(pipeSize(r.mat, r.cls, r.size));
 }
 
 export function placeRun(spec) {
@@ -639,12 +800,15 @@ export function changeRun(guid, ch) {
     if (!r) refuse('mep.err.none');
     const next = { ...r, ...c };
     writeDef(w, r.id, next);
-    // the label follows the size and system
-    const line = w.touch(r.id); line.Name = w.L(tr(next.kind === 'duct' ? 'mep.run.duct' : 'mep.run.pipe') + ' ' + (sectionOf(next)?.label || '') + ' ' + systemLabel(next.kind, next.system)); w.write(line);
+    relabel(w, r.id, next);
     regenMep(w, r.storey);
     const r2 = readRuns(w).find((x) => x.guid === guid);
     return { id: r2?.parts[0] ?? r.id, ids: r2?.parts || [] };
   });
+}
+/** A run's name follows its size and system. */
+function relabel(w, id, r) {
+  const line = w.touch(id); line.Name = w.L(tr(r.kind === 'duct' ? 'mep.run.duct' : 'mep.run.pipe') + ' ' + (sectionOf(r)?.label || '') + ' ' + systemLabel(r.kind, r.system)); w.write(line);
 }
 export function removeRuns(guids) {
   return op((w) => {
@@ -692,6 +856,49 @@ export function along(r, p) {
 }
 export const runLength = (r) => { const V = runVertices(r); let L = 0; for (let i = 1; i < V.length; i++) L += dist(V[i - 1], V[i]); return L; };
 
+// ---- sanitary drains by fixture units ----
+/** A point of a storey's plan (mm) in the building's world mm. */
+export function worldOf(w, storey, cache) {
+  if (!cache.has(storey)) cache.set(storey, w.storeyWorld(storey));
+  const M = cache.get(storey);
+  return (p) => [M[0] * p[0] + M[4] * p[1] + M[8] * p[2] + M[12], M[1] * p[0] + M[5] * p[1] + M[9] * p[2] + M[13], M[2] * p[0] + M[6] * p[1] + M[10] * p[2] + M[14]];
+}
+const nominalOf = (p) => (p ? (p.metric ? p.dn : p.nps) : 0);
+export function drainPlan(w) {
+  const cache = new Map();
+  const runs = readRuns(w).filter((r) => r.kind === 'pipe' && r.system === 'san').map((r) => ({ r, sec: sectionOf(r) })).filter((x) => x.sec)
+    .map(({ r, sec }) => ({ r, guid: r.guid, od: sec.od, verts: runVertices(r).map(worldOf(w, r.storey, cache)) }));
+  const fixtures = readFixturePorts(w).filter((q) => q.domain === 'pipe' && q.system === 'san' && q.flow === 'out' && q.fixture)
+    .map((q) => ({ id: q.id, p: worldOf(w, q.storey, cache)(q.p), size: q.size, kind: q.fixture }));
+  const net = drainNetwork(runs, fixtures), by = new Map(runs.map((x) => [x.guid, x])), plan = new Map();
+  for (const g of upstreamFirst(net)) {
+    const { r } = by.get(g), n = net.get(g), std = standardOf(r.mat), units = std === 'br' ? n.uhc : n.dfu;
+    const sizes = sizesFor(r.mat, r.cls).map((key) => ({ key, nominal: nominalOf(pipeSize(r.mat, r.cls, key)) }));
+    // never smaller than what flows into it (sized first), nor than the fixture drains it serves; a Brazilian building drain DN 100
+    let floor = std === 'br' ? Math.max(n.minDn, r.role === 'main' ? MAIN_MIN_DN : 0) : n.minIn;
+    for (const u of n.up) { const q = plan.get(u); if (q && q.std === std) floor = Math.max(floor, q.after); }
+    const now = nominalOf(pipeSize(r.mat, r.cls, r.size));
+    const need = units > 0 || floor > 0 ? smallestSize(std, sizes, units, { slope: r.slope, role: r.role, floor }) : null;
+    const grow = !!need && need.nominal > now + 1e-9;
+    plan.set(g, { id: r.id, guid: g, std, units, floor, size: r.size, need: need?.key ?? null, needNominal: need?.nominal ?? null, grow, toobig: (units > 0 || floor > 0) && !need, after: grow ? need.nominal : now });
+  }
+  return plan;
+}
+export function sizeDrains() {
+  return op((w) => {
+    const plan = drainPlan(w), runs = new Map(readRuns(w).map((r) => [r.guid, r])), storeys = new Set();
+    for (const q of plan.values()) {
+      if (!q.grow) continue;
+      const r = runs.get(q.guid), next = { ...r, size: q.need };
+      writeDef(w, r.id, next);
+      relabel(w, r.id, next);
+      storeys.add(r.storey);
+    }
+    for (const st of storeys) regenMep(w, st);
+    return { id: null, ids: [] };
+  });
+}
+
 // ---- sizing helpers ----
 const GPM = 3.785411784 / 60 / 1000;   // m³/s per US gallon a minute
 /** The smallest pipe of a material and class whose flow velocity stays at or under vmax. q in gpm ('in') or L/s ('mm'),
@@ -720,6 +927,44 @@ export function ductLoss(r, u = 'in') {
   if (r.kind !== 'duct' || !(r.flow > 0)) return null;
   const k = u === 'in' ? IN : 1;
   return sectionLoss({ q: r.flow, shape: r.shape, w: r.w / k, h: (r.shape === 'round' ? r.w : r.h) / k, u });
+}
+
+/** 0.8 EG.1/EG.2 (mep_PART_2): sizes for several runs in ONE undo step — `changes` [{ guid, size?, w?, h? }] (a pipe's size name, a duct's or carrier's width / height in mm). */
+export function setRunSizes(changes) {
+  return op((w) => {
+    const runs = new Map(readRuns(w).map((r) => [r.guid, r])), storeys = new Set();
+    for (const c of changes || []) {
+      const r = runs.get(c.guid);
+      if (!r) continue;
+      const next = { ...r };
+      if (c.size !== undefined && r.kind === 'pipe') next.size = String(c.size);
+      if (c.size !== undefined && r.kind === 'duct') next.size = String(c.size);   // a conduit's trade size rides on `size`
+      if (Number.isFinite(c.w) && r.kind === 'duct') next.w = c.w;
+      if (Number.isFinite(c.h) && r.kind === 'duct') next.h = c.h;
+      if (!sectionOf(next)) refuse('mep.err.size');
+      writeDef(w, r.id, next); relabel(w, r.id, next); storeys.add(r.storey);
+    }
+    for (const st of storeys) regenMep(w, st);
+    return { id: null, ids: [] };
+  });
+}
+/** A property set `CadCraft_MepCalc` on an element (a diffuser's airflow, a fixture's units, a luminaire's photometric file): `rows` [[name, ifcType, value]]. One undo step. */
+const CALC_CLASSES = ['IFCAIRTERMINAL', 'IFCFLOWTERMINAL', 'IFCLIGHTFIXTURE', 'IFCSANITARYTERMINAL', 'IFCUNITARYEQUIPMENT', 'IFCPUMP', 'IFCBOILER', 'IFCTANK', 'IFCFAN', 'IFCAIRTERMINALBOX', 'IFCHEATEXCHANGER',
+  'IFCELECTRICAPPLIANCE', 'IFCFIRESUPPRESSIONTERMINAL', 'IFCENERGYCONVERSIONDEVICE', 'IFCFLOWCONTROLLER', 'IFCDISTRIBUTIONELEMENT', 'IFCBUILDINGELEMENTPROXY', 'IFCFURNISHINGELEMENT', 'IFCFURNITURE'];
+/** An element by GlobalId, wider than ModelWriter.byGuid: also the equipment, terminals and fixtures a calculation puts a value on. */
+export function elementByGuid(w, guid) {
+  const hit = w.byGuid(guid);
+  if (hit) return hit;
+  for (const c of CALC_CLASSES) { let list = []; try { list = ids(w.api, w.mid, c); } catch (e) { continue; } for (const id of list) if (w.guidOf(id) === guid) return id; }
+  return null;
+}
+export function setCalcProps(guid, rows) {
+  return op((w) => {
+    const id = elementByGuid(w, guid);
+    if (!id) refuse('mep.err.none');
+    w.upsertPset(id, 'CadCraft_MepCalc', rows);
+    return { id, ids: [id] };
+  });
 }
 
 /** Schedules from the parts as written: pipe and duct by size with their lengths, fittings and valves by kind and size. */

@@ -42,6 +42,18 @@ Two sizes cannot have the same values. **Rename** changes a size's name; **Remov
 
 A placed piece's {{ui:Properties}} show its size, where it is and how far it is turned; {{key:Delete}} removes it. Every piece of one size shares that size's shape, so changing the family changes them all.
 
+## Sizes from a table
+
+{{ui:Sizes from a table…}} in a family's window reads a CSV file (comma, semicolon or tab). The first row names the columns: a parameter's name or label, and optionally `Name`. Lengths are millimetres unless you write a unit (`1.2 m`, `36 in`), Yes / No columns take yes, no, true, false, 1 or 0, and a parameter with no column keeps its default. Every row becomes a size, in one step you can undo; a size that is already there is skipped. One row that does not read, or that the family cannot draw, refuses the whole table and names its line. At most 200 rows and 1 MB. {{ui:Save the sizes as a table}} writes the same table back out.
+
+## Set on each element
+
+A parameter marked **Per element** in the editor (a Yes / No that adds a transom, a label, a material) is not part of a size: two doors of one size can differ. Pick the element and **Properties** shows these parameters; change one and that element is drawn again with its own shape (furniture and fixtures get a shape of their own, doors and windows are made again in their walls). Set them all back to their defaults and it goes back to its size's shape.
+
+## Detail level
+
+{{ui:Build}} › {{ui:Families…}} › **Detail level** sets, for every family in the model, what is saved in the solids and drawn in the plan symbols: **Fine** keeps everything, **Medium** and **Coarse** leave out the parts the editor marks as finer (smaller files, quicker views). **Automatic** saves everything and lets a sheet's view choose by its scale: 1:50 and larger fine, 1:100 medium, 1:200 and smaller coarse. One step you can undo.
+
 ## Duplicate a family
 
 You do not have to start from nothing. {{ui:Duplicate}} copies a family with its parameters, solids and sizes under a new name. Change the copy in the editor; the original stays as it was.
@@ -51,7 +63,11 @@ You do not have to start from nothing. {{ui:Duplicate}} copies a family with its
 - {{ui:Save the family file}} saves a `.ccfamily.json`: the family's parameters, solids and sizes. Open it in another model with {{ui:Open a family file…}} in the Families group.
 - {{ui:Save as IFC}} saves the family as a small IFC file: its sizes' types and its group, declared by an IFC project library. Other programs open it as a set of types; BimCraft opens it as the family again.
 
-A family file opened here is read as data and checked before anything is written. A family whose key is already in the model comes in as a separate family.
+A family file opened here is read as data and checked before anything is written. A family whose key is already in the model comes in as a separate family. A family that holds others (see Families inside, in the editor help) brings them along: the file lists them, and the model keeps the ones it already has.
+
+## Families in the Library
+
+Open {{ui:Families…}} and choose {{ui:From the Library…}} to see the families that have been shared in the Library. {{ui:Add to this project}} reads one like a family file: BimCraft checks every field before it makes anything, the family comes in as a family of its own, and it opens in the editor. Adding it is one undo step. To share your own, use {{ui:Save all as a library}} and send the file to the Library (the Library's staff publish a family file with a command, and each family is its own item with its sizes). If the Library cannot be reached the list says so and nothing changes.
 
 ## Other programs' types
 

@@ -1,0 +1,85 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* BimCraft's own parts inside the shell's workspace blocks (workspace-bimcraft.js; the blocks themselves: assets/css/app-workspace.css).
+   Doc's Properties and Project Browser look (drsurfbum/bimcraft-SDH F28), the wall workflow (F28-B), the Draw bar's controls when a layout
+   moves them into a slot. Scope: a page with a layout on, or a panels window holding the palettes. */
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb { padding: 0; border: 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb > h2 { display: none; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb details { border: 0; margin: 0; padding: 2px 0.25rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb summary { font-size: 0.6875rem; padding: 2px 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb ul { margin: 1px 0 0.1875rem; padding-left: 0.875rem; list-style: none; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb li { display: flex; flex-wrap: wrap; align-items: center; gap: 1px; min-width: 0; font-size: 0.6875rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb .bc-pb-go { font-size: 0.6875rem; padding: 2px 0.25rem; text-align: left; min-width: 0; overflow-wrap: anywhere; max-width: 100%; height: auto; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb .bc-pb-ic { font-size: 0.625rem; white-space: nowrap; padding: 1px 0.1875rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb [aria-current="page"] { font-weight: 700; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb .bc-pb-actions { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-pb .bc-pb-actions button { font-size: 0.625rem; line-height: 0.875rem; white-space: normal; padding: 2px; }
+.ws-browser-selected { background: var(--ws-soft) !important; outline: 1px solid var(--ws-hover); }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] { padding: 0.4375rem; font: 0.6875rem var(--font); overflow-wrap: anywhere; color: var(--ws-ink); }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] p { font-size: 0.6875rem; margin-block: 0.25rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-prop-name { font-size: 0.8125rem; font-weight: 600; margin: 0.3125rem 0 0.5625rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-h { font-size: 0.6875rem; padding: 0.1875rem 0; border-bottom: 1px solid var(--ws-line); margin: 0.375rem 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-dl, .ws-view-dl { display: grid; grid-template-columns: minmax(5.5rem, .9fr) minmax(5.625rem, 1.1fr); margin: 0; font: 0.6875rem var(--font); gap: 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-dl :is(dt, dd), .ws-view-dl :is(dt, dd) { font: inherit; margin: 0; padding: 0.25rem 0.3125rem; border-bottom: 1px solid var(--ws-line); min-width: 0; overflow-wrap: anywhere; align-content: center; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-dl dt, .ws-view-dl dt { background: var(--ws-chrome); }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] :is(.bc-input, .bc-mb-select) { font: inherit; padding: 0.1875rem; border: 1px solid var(--ws-line); min-width: 0; max-width: 100%; width: 100%; background: var(--ws-panel-bg); color: var(--ws-ink); border-radius: 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] :disabled { opacity: .7; cursor: default; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] :is(.bc-edit-hint, .bc-copy-all, .bc-model-props > .bc-sub) { display: none; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] .bc-set { padding: 0; margin: 0.375rem 0; border: 0; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] summary { font-size: 0.6875rem; background: var(--ws-chrome); padding: 0.25rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-palettes [data-props] button { font-size: 0.6875rem; height: auto; text-align: left; overflow-wrap: anywhere; max-width: 100%; }
+/* a wall's instance fields first: type, structure, height, base (F28) */
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-model-props:has([data-mp-height]) .bc-mp-dl > * { order: 10; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-mp-dl > :is(dt:has(+ dd [data-mp-type]), dd:has([data-mp-type])) { order: 0 !important; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-mp-dl > :is(dt:has(+ dd [data-mp-assembly]), dd:has([data-mp-assembly])) { order: 1 !important; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-mp-dl > :is(dt:has(+ dd [data-mp-height]), dd:has([data-mp-height])) { order: 2 !important; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .bc-mp-dl > :is(dt:has(+ dd [data-mp-base]), dd:has([data-mp-base])) { order: 3 !important; }
+.ws-prop-identity { display: flex; align-items: center; gap: 0.625rem; padding: 0.75rem 0.5rem; border-bottom: 1px solid var(--ws-line); }
+.ws-prop-identity .ws-icon { width: 2.375rem; height: 2.375rem; color: var(--ws-blue); }
+.ws-note { font-size: 0.6875rem; line-height: 1rem; color: var(--ws-muted); padding: 0.5rem; margin: 0; }
+.ws-props-units { flex-shrink: 0; border-top: 1px solid var(--ws-line); padding: 0.25rem 0.4375rem; background: var(--ws-chrome); }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-props-units select { font: 0.6875rem var(--font); border: 1px solid var(--ws-line); border-radius: 0; padding: 2px 0.1875rem; background: var(--ws-panel-bg); color: var(--ws-ink); }
+
+/* the wall workflow in the options bar (F28-B: the native placement inputs and the assembly dialog) */
+.ws-bc-options { display: contents; }
+.ws-options.ws-wall-options { background: color-mix(in srgb, var(--layer-green) 10%, var(--sheet)); color: var(--ink); }
+.ws-options.ws-placing { gap: 0.5rem; }
+.ws-options.ws-placing > [data-ws-options-text], .ws-options.ws-placing > .ws-tool { display: none; }
+.ws-wall-options { display: flex; align-items: center; gap: 0.5625rem; min-width: 0; flex: 1; }
+.ws-wall-options > :is([data-mopts="wall"], [data-mtyped-row]) { display: flex; flex-wrap: nowrap; align-items: center; gap: 0.4375rem; margin: 0; padding: 0; flex-shrink: 0; }
+.ws-wall-options :is([data-wall-assemblies], [data-model-hint]) { display: none !important; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-native-field { display: flex; align-items: center; gap: 0.25rem; white-space: nowrap; font-size: 0.6875rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) .ws-native-field > .visually-hidden { position: static !important; width: auto !important; height: auto !important; overflow: visible !important; clip: auto !important; clip-path: none !important; margin: 0 !important; white-space: nowrap !important; }
+.ws-wall-options input { font: 0.6875rem var(--font); border: 1px solid var(--ws-line); border-radius: 0; min-width: 4.0625rem; width: 5rem; max-width: 6.5625rem; padding: 2px 0.1875rem; background: var(--ws-panel-bg); color: var(--ws-ink); }
+.ws-wall-options select { max-width: 10rem; min-width: 3.75rem; }
+.ws-placement-props { padding: 0.4375rem; }
+.ws-placement-props > .ws-native-field { display: flex; flex-direction: column; align-items: stretch; margin: 0.5rem 0; white-space: normal; }
+.ws-placement-props [data-ws-command="assembly"] { display: block; margin: 0.3125rem 0 0.625rem; width: 100%; border-color: var(--ws-line); text-align: right; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] { max-height: 92dvh; overflow: auto; box-sizing: border-box; background: var(--ws-panel-bg); color: var(--ws-ink); border: 1px solid var(--ws-line); padding: 0.9375rem; font: 0.75rem var(--font); }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] table { min-width: 47.5rem; border-collapse: collapse; width: 100%; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] :is(td, th) { padding: 0.3125rem; border-bottom: 1px solid var(--ws-line); vertical-align: top; text-align: left; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] .bc-input { font: inherit; color: inherit; background: var(--ws-panel-bg); border: 1px solid var(--ws-line); padding: 0.25rem; max-width: 100%; box-sizing: border-box; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] .bc-lib-actions { position: sticky; bottom: -0.9375rem; background: var(--ws-panel-bg); padding: 0.5rem 0; border-top: 1px solid var(--ws-line); display: flex; gap: 0.5rem; justify-content: flex-end; z-index: 2; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-editor] button { border-color: var(--ws-line); padding: 0.25rem 0.4375rem; }
+:is(body.ws-on, :where(.shell-pw:has(.ws-palettes))) [data-assembly-effects] { padding: 0.4375rem; background: var(--ws-soft); border: 1px solid var(--ws-line); }
+.ws-type-dialog { width: min(35rem, 94vw); }
+
+/* a Draw tool's options row in the options bar or the info box; the Draw bar's controls in their slots */
+:is(.ws-tool-options, .tbx-ig-body) .bc-modelbar-row { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; }
+:is(.ws-tool-options, .tbx-ig-body) .bc-modelbar-row[hidden] { display: none; }
+.ws-tool-options .bc-num { width: 5rem; } .tbx-ig-body .bc-num { width: 5.5rem; }
+.tbx-ig-body .bc-mb-right { display: inline-flex; gap: .3rem; }
+:is(.tbx-ig-body, .tbx-quick) .bc-tool { padding: .2rem .45rem; border: var(--pen-1) solid var(--line); border-radius: var(--radius); }
+:is(.tbx-ig-body, .tbx-quick) .bc-tool:not([aria-pressed="true"]) { background: var(--sheet); }   /* a pressed one keeps the app's pressed colours */
+:is(.tbx-ig-body, .tbx-quick) .bc-tool:hover { border-color: var(--layer, var(--action)); }
+.tbx-quick .bc-mb-layout { display: inline-flex; gap: .2rem; }
+.tbx-quick .bc-global-units { display: inline-flex; align-items: center; gap: .35rem; }
+
+/* the right panel: its Properties tab is the Properties palette while a layout has palettes; dressed like the palettes */
+.bc.ws-active > .bc-right :is([data-rtab="props"], [data-rpane="props"]) { display: none !important; }
+.bc.ws-active > .bc-right .bc-sec { zoom: .85; }
+body.ws-b-palettes main > .bc-right .bc-rtabs { gap: 0; background: var(--ws-chrome); border-bottom: 1px solid var(--ws-line); }
+body.ws-b-palettes main > .bc-right .bc-rtab { flex: 0 0 auto; padding: .3125rem .625rem; font-size: .75rem; font-weight: 400; color: var(--ws-muted); background: transparent; border: 0; border-right: 1px solid var(--ws-line); border-bottom: 2px solid transparent; min-height: 0; }
+body.ws-b-palettes main > .bc-right .bc-rtab:hover { color: var(--ws-ink); background: var(--ws-soft); }
+body.ws-b-palettes main > .bc-right .bc-rtab[aria-selected="true"] { color: var(--ws-ink); font-weight: 600; background: var(--ws-panel-bg); border-bottom-color: var(--ws-blue); }
+body.ws-b-viewtabs .bc-stage.is-plan-only > [data-canvas-wrap] { visibility: hidden; }
+.ws-status-slot .bc-status.is-error { color: var(--layer-red); }

@@ -16,8 +16,8 @@ import { newBuilding, stackLevels } from './new-model.js';
 import { IfcEditor } from './ifc-edit.js';
 import { ModelWriter } from './model-write.js';
 import { snapshotModel, drawWalls, placeOpening, op } from './model-ops.js';
-import { importFamily, placeFamily, familyFile, familyWriter } from './family-ops.js';
-import { readFamily, familyIndex, sizeValues } from './family-model.js';
+import { importFamily, placeFamily, familyFile, familyWriter, setFamilyDetail } from './family-ops.js';
+import { readFamily, familyIndex, sizeValues, instanceValues } from './family-model.js';
 import { ids } from './ifc-util.js';
 
 const blank = () => new TextEncoder().encode(newBuilding({ name: 'Family', levels: stackLevels(1, 3000, () => 'Level 1'), fileName: 'family.ifc', now: new Date() }));   // i18n-ignore: names inside a scratch file nobody sees
@@ -31,21 +31,23 @@ export async function familyScratch(WebIFC, IfcModel) {
     return { ed, levels: snapshotModel(ed).levels };
   }
   return {
-    async preview(recipe, values = {}, { wallThickness = 140 } = {}) {
+    async preview(recipe, values = {}, { wallThickness = 140, deps = [], detail = 'auto' } = {}) {
       const r = readFamily(recipe);
       if (!r.ok) return { error: r.errors[0] };
       const fam = { ...r.family, key: 'fam-preview0' };
       const { ed, levels } = await fresh();
       const L1 = levels[0].guid;
       try {
+        for (const d of deps) ed.modelChange(importFamily({ ...d, sizes: [], revision: undefined }, { key: d.key }));   // the families it holds, under their own keys
+        if (detail !== 'auto') ed.modelChange(setFamilyDetail(detail));
         ed.modelChange(importFamily({ ...fam, sizes: [] }, { key: fam.key }));
         if (fam.host === 'wall') {
           const v = sizeValues(fam, values);
           const len = Math.max(3000, v.Width + 1200);
           ed.modelChange(drawWalls({ storey: L1, segs: [{ a: [-(len - v.Width) / 2, 0], b: [(len + v.Width) / 2, 0] }], typeKey: wallThickness <= 100 ? 'int-2x4' : 'ext-2x6', height: Math.max(2700, (v.Height || 0) + 900) }));
           const wall = snapshotModel(ed).walls[0].guid;
-          ed.modelChange(placeOpening({ wall, family: fam.key, values: v, offset: (len - v.Width) / 2, width: v.Width, height: v.Height, sill: fam.kind === 'window' ? 900 : 0 }));
-        } else ed.modelChange(placeFamily({ storey: L1, family: fam.key, values, x: 0, y: 0 }));
+          ed.modelChange(placeOpening({ wall, family: fam.key, values: v, instance: instanceValues(fam, values), offset: (len - v.Width) / 2, width: v.Width, height: v.Height, sill: fam.kind === 'window' ? 900 : 0 }));
+        } else ed.modelChange(placeFamily({ storey: L1, family: fam.key, values, instance: instanceValues(fam, values), x: 0, y: 0 }));
       } catch (e) {
         return { error: { key: e.key || 'fam.err.expr', fill: e.fill || { where: '', why: e.message } } };
       }
@@ -55,13 +57,14 @@ export async function familyScratch(WebIFC, IfcModel) {
     },
     async library(file) {
       const { ed } = await fresh();
-      ed.modelChange(importFamily(file, { key: file.key }));
+      ed.modelChange(importFamily(file, { key: file.key }));   // (its `uses` come along: the library holds the families it holds)
       ed.modelChange(op((w) => {
         familyWriter(w);
         const proj = w.api.GetLine(w.mid, ids(w.api, w.mid, 'IFCPROJECT')[0], false);
         const idx = familyIndex(w), g = idx.groups.get(file.key);
         const lib = w.make('IFCPROJECTLIBRARY', w.guid(), w.ownerHistory(), w.L(file.name), null, null, null, null, proj.RepresentationContexts, proj.UnitsInContext);
-        const defs = [w.H(g.id), ...[...idx.sizes].filter(([, s]) => s.family === file.key).map(([tid]) => w.H(tid))];
+        // the family and its sizes, and every family it holds with theirs (in the scratch file there are no others)
+        const defs = [...[...idx.groups.values()].map((x) => w.H(x.id)), ...[...idx.sizes.keys()].map((tid) => w.H(tid))];
         w.make('IFCRELDECLARES', w.guid(), w.ownerHistory(), null, null, w.H(lib), defs);
         w.make('IFCRELDECLARES', w.guid(), w.ownerHistory(), null, null, w.H(proj.expressID), [w.H(lib)]);
         return { id: null, ids: [] };

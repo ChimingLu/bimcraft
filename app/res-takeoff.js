@@ -23,6 +23,7 @@
 import { planSheet, blankSheet, setPdf, PAPERS } from './res-sheets.js';
 import { PACK_ITEMS } from './res-takeoff-packs.js';
 import { t as tr } from './i18n.js';
+import { isMetric } from './model-units.js';
 
 export const EMBED_NAME = 'takeoff.takeoffcraft.json';
 const PT = 72 / 25.4;
@@ -34,10 +35,10 @@ async function sha256Hex(bytes) {
   const d = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
-function unitFor(type, units) { return type === 'count' ? 'EA' : type === 'area' ? (units === 'mm' ? 'm²' : 'SF') : (units === 'mm' ? 'm' : 'LF'); }
+function unitFor(type, units) { return type === 'count' ? 'EA' : type === 'area' ? (isMetric(units) ? 'm²' : 'SF') : (isMetric(units) ? 'm' : 'LF'); }
 
 export async function buildTakeoff(input) {
-  const units = input.units === 'mm' ? 'mm' : 'ftin', paper = PAPERS[input.paper] ? input.paper : (units === 'mm' ? 'a3' : 'tabloid');
+  const units = isMetric(input.units) ? 'mm' : 'ftin', paper = PAPERS[input.paper] ? input.paper : (isMetric(units) ? 'a3' : 'tabloid');
   const opts = { paper, units, project: input.project || '', date: input.date || '' };
   // items: the keys used, in the order first met
   const used = [];

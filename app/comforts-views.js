@@ -27,6 +27,7 @@
  * library items (cabinets, fixtures) in front of the wall it looks at.
  */
 import { projectView } from './res-views.js';
+import { cutFaceItems } from './wall-section-graphics.js';
 import { PAPERS, scaleFor } from './res-sheets.js';   // read only: the papers and scales every sheet uses
 import { t as tr } from './i18n.js';
 
@@ -118,12 +119,8 @@ export function openingFacts(openings, walls, geom) {
 /** Sheet items for a view's drawing: what it cuts filled grey with a heavy outline, what it sees as thin lines. */
 export function viewItems(view, P) {
   const out = [];
-  for (const c of view.cuts || []) {
-    const polys = c.loops.map((l) => l.map(P));
-    out.push({ t: 'fill', polys, g: 0.6 });
-    for (const pl of polys) out.push({ t: 'line', pts: [...pl, pl[0]], w: 0.45, g: 0 });
-  }
   for (const l of view.lines || []) out.push({ t: 'line', pts: [P([l[0], l[1]]), P([l[2], l[3]])], w: 0.18, g: 0 });
+  for (const c of view.cuts || []) out.push(...cutFaceItems(c,P));
   return out;
 }
 /** Sheet items for notes: dimensions (a line with ticks and its text, `off` mm of paper out from what it measures), level marks

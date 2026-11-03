@@ -10,8 +10,13 @@
  *            shown(), storeyName(id) → text }
  */
 import { el } from './ui-util.js';
+import { getDisplayUnits, localizeQuantities, fmtM2 } from './model-units.js';   // GH.3-A: results in the picked unit
+const Q = (s) => localizeQuantities(s, getDisplayUnits());
 import { t } from './i18n.js';
 import { DEFAULTS, gatherRooms, daylight, daylightCsv } from './daylight-bim.js';
+import { profile, frontTris, obstructionAngle, vsc } from './daylight-bim-sky.js';
+import { SKY, skySection, windowLine, roomExtras } from './daylight-bim-sky-ui.js';
+import { energySection } from './energy-bim-ui.js';
 
 const KEY = 'bimcraft.daylight';
 const WORD = { T: 'trans', glazedShare: 'glazed', M: 'maint', floor: 'floor', wall: 'wall', ceiling: 'ceiling', A: 'area', R: 'refl' };   // input / column → its key's word
@@ -39,7 +44,16 @@ export function mountDaylight(host) {
     host.status(t('day.working'));
     await new Promise((r) => setTimeout(r, 30));   // let the "working" line paint
     try {
-      S.gathered = gatherRooms(host.W, e.api, e.mid);
+      const g = gatherRooms(host.W, e.api, e.mid, { keep: true });
+      // (0.7) each window's sky profile: its VSC and obstruction angle, and what the sun and grid sections read
+      const wins = g.rooms.flatMap((r) => r.windows);
+      for (let i = 0; i < wins.length; i++) {
+        const w = wins[i];
+        w.prof = profile(w, frontTris(g.prods, w)); w.alpha = obstructionAngle(w.prof); w.vsc = vsc(w.prof);
+        if (i % 4 === 3) { host.status(t('day.sky.working', { n: i + 1, of: wins.length })); await new Promise((r) => setTimeout(r, 0)); }
+      }
+      S.gathered = g;
+      SKY.sun = null; SKY.grid = null;
       S.stale = false;
       const n = S.gathered.rooms.length;
       host.status(n ? t('day.done', { n, w: S.gathered.rooms.reduce((s, r) => s + r.windows.length, 0) }) : t('day.no-rooms'), !n);
@@ -56,6 +70,10 @@ export function mountDaylight(host) {
     el('input', { type: 'number', className: 'bc-input fa-input', step, min: String(LIMITS[k][0]), max: String(LIMITS[k][1]), value: String(S.inputs[k]), 'data-day-in': k,
       onchange: (e) => { const x = Number(e.target.value), [lo, hi] = LIMITS[k]; if (Number.isFinite(x) && x >= lo && x <= hi) { S.inputs[k] = x; save(); } else e.target.value = String(S.inputs[k]); render(); } }));
 
+  const sky = {
+    gathered: () => S.gathered, inputs: () => opts(), render: () => render(), busy: (on) => { S.busy = on; },
+    open: (id) => { S.open = id; const r = S.gathered?.rooms.find((x) => x.id === id); host.select([id, ...(r?.windows || []).map((w) => w.id)]); render(); },
+  };
   function render() {
     if (!host.shown()) return;
     if (!ed()) { host.pane.replaceChildren(el('p', { className: 'bc-muted' }, t('day.needs-ifc'))); return; }
@@ -81,17 +99,22 @@ export function mountDaylight(host) {
         if (open) {
           out.push(el('section', { className: 'as-detail', 'data-day-detail': open.guid },
             el('h3', { className: 'bc-h fa-h3' }, [open.name, open.longName].filter(Boolean).join(' ')),
-            el('p', {}, t('day.detail.surfaces', { A: open.A.toFixed(1), floor: open.areas.floor.toFixed(1), wall: open.areas.wall.toFixed(1), ceiling: open.areas.ceiling.toFixed(1), glass: open.areas.glass.toFixed(1), R: open.R.toFixed(3) })),
+            el('p', {}, t('day.detail.surfaces.u', { A: fmtM2(open.A, getDisplayUnits()), floor: fmtM2(open.areas.floor, getDisplayUnits(), false), wall: fmtM2(open.areas.wall, getDisplayUnits(), false), ceiling: fmtM2(open.areas.ceiling, getDisplayUnits(), false), glass: fmtM2(open.areas.glass, getDisplayUnits(), false), R: open.R.toFixed(3) })),
             open.windows.length ? el('ul', { className: 'as-log' }, ...open.windows.map((w) => el('li', { 'data-day-window': w.guid },
-              el('strong', {}, w.name || w.tag || '#' + w.id), ' ', t('day.detail.window', { area: w.area.toFixed(2), glazed: w.glazed.toFixed(2), theta: w.theta.toFixed(1) }))))
+              el('strong', {}, w.name || w.tag || '#' + w.id), ' ', Q(t('day.detail.window', { area: w.area.toFixed(2), glazed: w.glazed.toFixed(2), theta: w.theta.toFixed(1) })), ' ', windowLine(w))))
               : el('p', { className: 'bc-muted' }, t('day.detail.nowindow')),
-            el('p', { className: 'bc-muted' }, t('day.detail.formula'))));
+            el('p', { className: 'bc-muted' }, t('day.detail.formula')),
+            ...roomExtras(open, host, sky)));
         }
+        out.push(...skySection(host, sky));   // 0.7 LC.20: the sun on a date, the daylight factor on a grid
+        const en = energySection(host, sky);   // 0.7 LC.20: heating and cooling loads
+        if (en) out.push(en);
       }
       if (S.gathered.roof.length) out.push(el('p', { className: 'bc-muted', 'data-day-roof': '' }, t('day.roof', { n: S.gathered.roof.length })));
       if (S.gathered.unassigned.length) out.push(el('p', { className: 'bc-muted', 'data-day-alone': '' }, t('day.alone', { n: S.gathered.unassigned.length })));
     }
     host.pane.replaceChildren(...out);
   }
-  return { render, state: S, changed() { if (S.gathered) S.stale = true; render(); } };
+  window.addEventListener('bimcraft-units', () => { try { render(); } catch (e) { /* GH.3-A: the tab has nothing to show yet */ } });   // results follow the display unit
+  return { render, state: S, sky: SKY, changed() { if (S.gathered) S.stale = true; render(); } };
 }

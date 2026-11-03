@@ -88,8 +88,12 @@ export function unitMm(u) {
   }
   if (u.ConversionFactor) {
     const f = u.ConversionFactor;   // IfcMeasureWithUnit: value × its unit (usually SI metre)
-    const v = Number(val(f.ValueComponent));
-    const base = f.UnitComponent ? unitMm(f.UnitComponent) : 1000;
+    // web-ifc: {ValueComponent, UnitComponent}; cc-ifc: {name:'IFCMEASUREWITHUNIT', value:[factor, unit]}. The unit is a
+    // {ref} when it was not inlined; it is the SI metre in every file we write, so a ref reads as metres.
+    const arr = Array.isArray(f.value) ? f.value : null;
+    const v = Number(arr ? val(arr[0]) : val(f.ValueComponent));
+    const uc = arr ? arr[1] : f.UnitComponent;
+    const base = uc && !uc.ref && typeof uc === 'object' && (uc.Name || uc.ConversionFactor) ? unitMm(uc) : 1000;
     if (Number.isFinite(v) && v > 0) return v * base;
     const n = String(val(u.Name) || '').toUpperCase();
     return n.includes('FOOT') ? 304.8 : n.includes('INCH') ? 25.4 : 1000;

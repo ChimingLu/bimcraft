@@ -13,6 +13,7 @@
  *   fmtLength(m) / fmtArea(m2)               "3.25 m", "1.20 m²"
  */
 import { runEdges } from './ifc-vis.js';
+import { fmtLen, fmtArea as fmtModelArea, getDisplayUnits } from './model-units.js';
 
 export { runEdges };
 
@@ -92,8 +93,32 @@ export function snapTo(points, edges, cursor, project, { vertexPx = 10, edgePx =
 }
 
 export const distance = (a, b) => len(sub(b, a));
+/** Prefer an orthogonal measurement when its endpoint is within a small screen tolerance. */
+export function axisSnap(a, b, cursor, project, tolerancePx = 12) {
+  let best = b, bestPx = tolerancePx;
+  for (let i = 0; i < 3; i++) {
+    const p = [...a]; p[i] = b[i];
+    const s = project(p);
+    if (!s) continue;
+    const d = Math.hypot(s[0] - cursor[0], s[1] - cursor[1]);
+    if (d < bestPx && Math.abs(p[i] - a[i]) > 1e-6) { best = p; bestPx = d; }
+  }
+  return best;
+}
+/**
+ * GH.3-C: the end point of a measured segment held orthogonal: only the longest component of the move from a to b is kept
+ * (viewer axes, Y up). planOnly (looking straight down: a plan) allows the two horizontal axes only. → { point, axis: 0|1|2 }
+ */
+export function orthoPoint(a, b, planOnly = false) {
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const axes = planOnly ? [0, 2] : [0, 1, 2];
+  let axis = axes[0];
+  for (const k of axes) if (Math.abs(d[k]) > Math.abs(d[axis])) axis = k;
+  const point = [...a]; point[axis] = b[axis];
+  return { point, axis };
+}
 export const ifcDelta = (a, b) => [b[0] - a[0], -(b[2] - a[2]), b[1] - a[1]];
 const trim = (v, d) => v.toFixed(d).replace(/\.?0+$/, '') || '0';
-export const fmtLength = (m) => (Math.abs(m) < 10 ? m.toFixed(3) : m.toFixed(2)) + ' m';
-export const fmtArea = (m2) => (m2 < 10 ? m2.toFixed(3) : m2.toFixed(2)) + ' m²';
+export const fmtLength = (m) => fmtLen(m * 1000, getDisplayUnits(), { unit: true });
+export const fmtArea = (m2) => fmtModelArea(m2 * 1e6, getDisplayUnits());
 export { trim };

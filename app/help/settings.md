@@ -17,6 +17,10 @@ The menu style (BimCraft's own toolbar, a home-design menu bar, a BIM ribbon or 
 - **Show rooms and spaces** (off at the start): rooms and spaces are see-through boxes that can hide the walls behind them, so they start hidden. The {{ui:Spaces}} button above the model still turns them on and off for the open model.
 - **Edges**: {{ui:Edges on}} (the start) draws the edge lines that give the drafting look. {{ui:Small models only}} draws them only for models under 300,000 triangles, which keeps big models quicker to turn. {{ui:Edges off}} starts every model without them. The {{ui:Edges}} button still switches them for the open model. Above 1.5 million triangles edges are always off.
 
+## Drawings open in
+
+How a DWG or DXF drawing first shows: {{ui:3D (fastest)}} (the start) draws even a large drawing quickly, or {{ui:Model (2D)}} opens the flat model space view. The tabs above the drawing switch between {{ui:Model}}, the sheets and {{ui:3D}} any time. A drawing with nothing in model space, or a browser that can't show 3D, always opens in 2D.
+
 ## Opening view
 
 The camera a model opens with: {{ui:Fit}} (the start, the whole model from a corner), {{ui:Top}}, {{ui:Front}} or {{ui:Side}}. The buttons above the model change the view any time.

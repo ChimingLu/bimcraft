@@ -25,7 +25,7 @@ import { videoSupport, createVideoSink, even } from './video.js';
 export const VIDEO_SIZES = { view: null, p480: [854, 480], p720: [1280, 720], p1080: [1920, 1080] };
 export const VIDEO_QUALITY = { quick: 4, draft: 16, good: 64 };
 export const VIDEO_FPS = [24, 25, 30, 60];
-export const VIDEO_FORMATS = ['webm', 'png'];
+export const VIDEO_FORMATS = ['webm', 'mp4', 'png'];   // mp4: 0.7 RN.10, where the browser encodes H.264
 
 /** The remembered choices, checked (they come from storage or a file). */
 export function cleanVideo(v, fps = 30) {
@@ -63,7 +63,7 @@ export function openVideoDialog(o) {
   injectCss();
   const gl = webglInfo();
   let v = cleanVideo(o.video, o.fps);
-  let running = null, lastBlob = null, lastExt = 'webm', canWebm = false;
+  let running = null, lastBlob = null, lastExt = 'webm', canWebm = false, canMp4 = false;
   const vs = o.viewSize();
   const opt = (value, label, cur) => el('option', { value, selected: String(value) === String(cur) }, label);
   const sizeSel = el('select', { className: 'select-cc', dataset: { videoSize: '' } }, Object.keys(VIDEO_SIZES).map((k) => {
@@ -80,13 +80,29 @@ export function openVideoDialog(o) {
   const goBtn = el('button', { type: 'button', className: 'btn-plot btn-sm-cc', dataset: { videoGo: '' }, disabled: !gl.ok }, t('render.video.go'));
   const saveBtn = el('button', { type: 'button', className: 'btn-line btn-sm-cc', dataset: { videoSave: '' }, disabled: true }, t('render.video.save'));
   const closeBtn = el('button', { type: 'button', className: 'btn-line btn-sm-cc', dataset: { videoClose: '' } }, t('render.close'));
+  // 0.7 RN.10: the animation path traced, frame by frame, in the render queue (queue-ui.js; the Render dialog's settings)
+  const blurIn = el('input', { type: 'checkbox', dataset: { videoMotionBlur: '' } });
+  const queueAdd = el('button', { type: 'button', className: 'btn-line btn-sm-cc', dataset: { videoQueueAdd: '' } }, t('render.queue.add.video'));
+  const queueBox = el('div', { dataset: { renderQueue: '' } });
+  const queueFs = el('fieldset', { dataset: { videoQueueFs: '' } }, el('legend', {}, t('render.queue')),
+    el('p', { className: 'cc-render-note' }, t('render.queue.video.hint')), el('label', { className: 'cc-render-check' }, blurIn, t('render.queue.blur')), queueAdd, queueBox);
+  let queueUi = null;
+  import('./queue-ui.js').then(({ mountQueue }) => { queueUi = mountQueue({ el, t, box: queueBox, o, getSettings: () => cleanSettings(o.settings) }); }).catch(() => { queueFs.hidden = true; });
+  queueAdd.addEventListener('click', async () => {
+    if (!queueUi || v.format === 'png') { status.textContent = t('render.queue.video.format'); return; }
+    queueAdd.disabled = true;
+    try { const z = videoSize(v.size, vs.w, vs.h); await queueUi.addFrames({ w: even(z.w), h: even(z.h), fps: v.fps, format: v.format, motionBlur: blurIn.checked }); status.textContent = t('render.queue.added'); }
+    catch (e) { status.textContent = t('render.failed', { error: String(e?.message || e) }); }
+    finally { queueAdd.disabled = false; }
+  });
   const form = el('form', { className: 'cc-render-form', method: 'dialog' },
     el('label', {}, t('render.video.size'), sizeSel),
     el('label', {}, t('render.video.fps'), fpsSel),
     el('label', {}, t('render.video.quality'), qualSel),
     el('label', {}, t('render.video.format'), fmtSel), fmtNote,
     est,
-    el('p', { className: 'cc-render-note' }, t('render.video.look')));
+    el('p', { className: 'cc-render-note' }, t('render.video.look')),
+    queueFs);
   form.addEventListener('submit', (e) => e.preventDefault());
   const dlg = el('dialog', { className: 'cc-render', 'aria-labelledby': 'cc-video-h', dataset: { videoDialog: '' } },
     el('div', { className: 'cc-render-head' }, el('h2', { id: 'cc-video-h' }, t('render.video.title'))),
@@ -98,11 +114,12 @@ export function openVideoDialog(o) {
     v = read();
     const n = Math.max(1, Math.round(o.length() * v.fps) + 1), z = videoSize(v.size, vs.w, vs.h);
     est.textContent = t('render.video.estimate', { n, s: Math.round(o.length() * 10) / 10, w: z.w, h: z.h, passes: VIDEO_QUALITY[v.quality] });
-    fmtNote.textContent = v.format === 'png' ? t('render.video.format.png.note') : canWebm ? '' : t('render.video.format.none');
-    if (!running) goBtn.disabled = !gl.ok || (v.format === 'webm' && !canWebm);
+    const can = v.format === 'webm' ? canWebm : v.format === 'mp4' ? canMp4 : true;
+    fmtNote.textContent = v.format === 'png' ? t('render.video.format.png.note') : can ? '' : t(v.format === 'mp4' ? 'render.video.format.nomp4' : 'render.video.format.none');
+    if (!running) goBtn.disabled = !gl.ok || !can;
   };
   form.addEventListener('change', () => { sync(); o.saveVideo?.(v); });
-  videoSupport(1280, 720, 30).then((s) => { canWebm = !!s.webm; sync(); });
+  videoSupport(1280, 720, 30).then((s) => { canWebm = !!s.webm; canMp4 = !!s.mp4; sync(); });
   sync();
 
   const setRunning = (on) => {
@@ -164,7 +181,7 @@ export function openVideoDialog(o) {
   goBtn.addEventListener('click', go);
   saveBtn.addEventListener('click', () => {
     if (!lastBlob) return;
-    const name = (o.fileBase ? o.fileBase() : 'animation') + (lastExt === 'zip' ? ' frames.zip' : ' animation.webm');   // i18n-ignore: file name endings
+    const name = (o.fileBase ? o.fileBase() : 'animation') + (lastExt === 'zip' ? ' frames.zip' : lastExt === 'mp4' ? ' animation.mp4' : ' animation.webm');   // i18n-ignore: file name endings
     o.download(lastBlob, name);
     status.textContent = t('render.saved', { file: name });
   });

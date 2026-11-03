@@ -1,4 +1,9 @@
+import { legendItems } from './keynotes.js';
+import { documentItems } from './assembly-schedule-layout.js';
 /* SPDX-License-Identifier: Apache-2.0 */
+import { layerPrimitives, colorRgb } from './wall-plan-graphics.js';
+import { cutFaceItems } from './wall-section-graphics.js';
+import { dimensionFootprint } from './dimension-geometry.js';
 /**
  * res-sheets.js — a print-ready drawing set made from the model (0.5 part 4, RC.5): plans of each level, the four exterior
  * elevations, building sections from section lines, schedules, framing elevations of each framed wall — laid out on
@@ -29,17 +34,19 @@
 import { ModelWriter, round } from './model-write.js';
 import { ids, val } from './ifc-util.js';
 import { t as tr } from './i18n.js';
+import { isMetric } from './model-units.js';
+import * as PDFI from './picture-pdf.js';   // 0.8 D8.8 round 5: pictures in section / elevation views
 import { noteItems } from './comforts-views.js';   // 0.6 round 2 (bim-comforts_PART_2): dimensions, level marks and tags on views
 
 export const SECTION_PSET = 'CadCraft_SectionLine';
 export const PAPERS = { letter: [279.4, 215.9], tabloid: [431.8, 279.4], archd: [914.4, 609.6], a3: [420, 297], a1: [841, 594] };
-export const scalesFor = (units) => (SCALES[units] || SCALES.ftin).map(([ratio, label]) => ({ ratio, label }));   // 0.6 DF.19: the sheet editor's list
+export const scalesFor = (units) => SCALES[isMetric(units) ? 'mm' : 'ftin'].map(([ratio, label]) => ({ ratio, label }));   // 0.6 DF.19: the sheet editor's list
 const SCALES = {
   ftin: [[16, '3/4" = 1\'-0"'], [24, '1/2" = 1\'-0"'], [32, '3/8" = 1\'-0"'], [48, '1/4" = 1\'-0"'], [64, '3/16" = 1\'-0"'], [96, '1/8" = 1\'-0"'], [192, '1/16" = 1\'-0"'], [384, '1/32" = 1\'-0"']],   // i18n-ignore: drawing scales
   mm: [[20, '1:20'], [25, '1:25'], [50, '1:50'], [100, '1:100'], [200, '1:200'], [500, '1:500'], [1000, '1:1000']],   // i18n-ignore: drawing scales
 };
 export function scaleFor(w, h, room, units = 'ftin', minRatio = 0) {
-  const list = (SCALES[units] || SCALES.ftin).filter(([r]) => r >= minRatio);
+  const list = SCALES[isMetric(units) ? 'mm' : 'ftin'].filter(([r]) => r >= minRatio);
   const s = list.find(([r]) => w / r <= room[0] && h / r <= room[1]);
   if (s) return { ratio: s[0], label: s[1] };
   const r = Math.ceil(Math.max(w / room[0], h / room[1]));
@@ -60,7 +67,10 @@ function planItems(scene, P, k) {
     if (c.loops?.length) out.push({ t: 'fill', polys: c.loops.map((l) => { const pts = []; for (let i = 0; i + 1 < l.length; i += 2) pts.push(P([l[i], l[i + 1]])); return pts; }), g: 0.75 });
     seg(c.segs, 0.25, 0);
   }
-  for (const w of scene.walls || []) for (const p of w.pieces || [w.poly]) if (p?.length) out.push({ t: 'fill', polys: [p.map(P)], g: 0.55 });
+  for (const w of scene.walls || []) {
+    if (w.layers) for (const it of layerPrimitives(w)) out.push(it.t === 'fill' ? { ...it, polys: it.polys.map(p => p.map(P)) } : { ...it, pts: it.pts.map(P) });
+    else for (const p of w.pieces || [w.poly]) if (p?.length) out.push({ t: 'fill', polys: [p.map(P)], g: 0.55 });
+  }
   for (const p of scene.wallEdges || []) out.push({ t: 'line', pts: [...p.map(P), P(p[0])], w: 0.5, g: 0 });
   for (const s of scene.symbols || []) {
     for (const l of s.lines || []) seg(l, 0.35, 0);
@@ -80,6 +90,7 @@ function planItems(scene, P, k) {
     const u = [(d.b[0] - d.a[0]) / L, (d.b[1] - d.a[1]) / L], n = [-u[1], u[0]], off = d.offPx !== undefined ? d.offPx * 0.3 / k : d.off || 0;   // screen px → about 0.3 mm of paper
     const A = [d.a[0] + n[0] * off, d.a[1] + n[1] * off], B = [d.b[0] + n[0] * off, d.b[1] + n[1] * off];
     out.push({ t: 'line', pts: [P(A), P(B)], w: 0.13, g: 0 });
+    if (d.witnesses) for (const [i, q] of [A, B].entries()) out.push({ t: 'line', pts: [P(d.witnesses[i]), P(q)], w: 0.13, g: 0 });
     const tk = 1 / k, tick = [(u[0] - n[0]) * tk, (u[1] - n[1]) * tk];
     for (const q of [A, B]) out.push({ t: 'line', pts: [P([q[0] - tick[0], q[1] - tick[1]]), P([q[0] + tick[0], q[1] + tick[1]])], w: 0.13, g: 0 });
     let rot = Math.atan2(u[1], u[0]);
@@ -110,14 +121,20 @@ function bubble(c, tag, r = 3.5) {
   for (let i = 0; i <= 24; i++) { const a = i / 24 * Math.PI * 2; pts.push([c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)]); }
   return [{ t: 'fill', polys: [pts], g: 1 }, { t: 'line', pts, w: 0.25, g: 0 }, { t: 'text', s: tag, x: c[0], y: c[1] - 1.1, size: tag.length > 2 ? 5 : 6.5, bold: true }];
 }
-function viewItems(view, P, k = 0) {
+export function viewItems(view, P, k = 0) {
   const out = [];
-  for (const c of view.cuts || []) {
-    const polys = c.loops.map((l) => l.map(P));
-    out.push({ t: 'fill', polys, g: /Geographic/.test(c.cls) ? 0.82 : 0.6 });
-    for (const pl of polys) out.push({ t: 'line', pts: [...pl, pl[0]], w: 0.45, g: 0 });
+  // 0.8 D8.8 round 5: pictures standing on a plane square to this view (res-ui.js attaches them as view.images), under all the lines
+  if (view.images?.length) {
+    const o = P([0, 0]), ex = P([1, 0]), kk = ex[0] - o[0], b = view.bounds;
+    if (b) { const p0 = P([b.x0, b.y0]), p1 = P([b.x1, b.y1]); out.push({ t: 'clip', rect: [Math.min(p0[0], p1[0]), Math.min(p0[1], p1[1]), Math.max(p0[0], p1[0]), Math.max(p0[1], p1[1])] }); }
+    for (const im of view.images) {
+      const m = im.m;
+      out.push({ t: 'image', image: im.image, w: im.w, h: im.h, opacity: im.opacity ?? 1, href: im.href || null, name: im.name || '', m: [m[0] * kk, m[1] * kk, m[2] * kk, m[3] * kk, o[0] + m[4] * kk, o[1] + m[5] * kk] });
+    }
+    if (b) out.push({ t: 'unclip' });
   }
   for (const l of view.lines || []) out.push({ t: 'line', pts: [P([l[0], l[1]]), P([l[2], l[3]])], w: 0.18, g: 0 });
+  for (const c of view.cuts || []) out.push(...cutFaceItems(c,P,k>0?1/k:c.scale));
   // grid lines seen end on (0.6 DF.16): from under the ground line to above the top, the bubble on top
   const b = view.bounds;
   if (b) for (const g of view.grids || []) {
@@ -126,9 +143,11 @@ function viewItems(view, P, k = 0) {
     out.push({ t: 'line', pts: [lo, hi], w: 0.13, g: 0.35, dash: [5, 1, 0.6, 1] }, ...bubble([hi[0], hi[1] + 3.5], g.tag));
   }
   // the ground line under it all, past both ends — unless the model has its ground (terrain draws itself)
-  if (b && !view.ground) out.push({ t: 'line', pts: [P([b.x0 - 450, b.y0]), P([b.x1 + 450, b.y0])], w: 0.6, g: 0 });
+  const groundY=view.groundY??b?.y0;
+  if (b && !view.ground && groundY>=b.y0 && groundY<=b.y1) out.push({ t: 'line', pts: [P([b.x0 - 450, groundY]), P([b.x1 + 450, groundY])], w: 0.6, g: 0 });
   // 0.6 round 2 (bim-comforts_PART_2): the view's notes — level marks, dimensions, door / window / item tags (comforts-views.js)
   if (view.notes?.length && k > 0) out.push(...noteItems(view.notes, P, k));
+  if(b && view.warnings?.length)out.push({t:'text',s:tr('proj.diagnostic')+' '+[...new Set(view.warnings.map(w=>w.reason))].join(', '),x:P([b.x0,b.y1])[0],y:P([b.x0,b.y1])[1]+4,size:6,align:'left'});
   return out;
 }
 function framingItems(fr, P) {
@@ -164,6 +183,7 @@ function boundsOfScene(scene) {
   for (const s of scene.symbols || []) for (const q of s.poly || []) g(q[0], q[1]);
   for (const x of scene.grids || []) { g(x.a[0], x.a[1]); g(x.b[0], x.b[1]); }   // 0.6 DF.16
   for (const d of scene.drafting || []) for (const l of d.lines || []) for (const q of l) g(q[0], q[1]);   // 0.6 DC.117 (d)
+  for (const d of scene.dims || []) if (d.key) for (const q of dimensionFootprint(d)) g(q[0], q[1]);
   if (!Number.isFinite(b.x0)) return null;
   const pad = Math.max(b.x1 - b.x0, b.y1 - b.y0) * 0.03 + 300;
   return { x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad };
@@ -197,7 +217,7 @@ function drawCell(title, bb, units, drawWith, forced = null, minRatio = 0) {
   const W = Math.max(1, bb.x1 - bb.x0), H = Math.max(1, bb.y1 - bb.y0);
   const cell = { title, scale: null, bb, draw: null };
   cell.draw = (x, y, w, h) => {
-    const sc = forced ? { ratio: forced, label: (SCALES[units] || SCALES.ftin).find((s) => s[0] === forced)?.[1] || '1:' + forced } : scaleFor(W, H, [w, h], units, minRatio);   // i18n-ignore: a scale ratio
+    const sc = forced ? { ratio: forced, label: SCALES[isMetric(units) ? 'mm' : 'ftin'].find((s) => s[0] === forced)?.[1] || '1:' + forced } : scaleFor(W, H, [w, h], units, minRatio);   // i18n-ignore: a scale ratio
     cell.scale = sc.label;
     const k = 1 / sc.ratio, ox = x + (w - W * k) / 2 - bb.x0 * k, oy = y + (h - H * k) / 2 - bb.y0 * k;
     cell.place = { P: at(k, ox, oy), ratio: sc.ratio, label: sc.label };
@@ -210,7 +230,7 @@ export function buildSet(input, { paper = 'tabloid', units = 'ftin', project = '
   const [PW, PH] = PAPERS[paper] || PAPERS.tabloid;
   const roomFor = (n) => [(PW - 20) / n - 12, PH - 20 - 18 - 22];
   const opts = { paper, project, date };
-  const BUILDING = units === 'mm' ? 50 : 48;   // plans, elevations and sections no larger than 1:50 or a quarter inch to the foot
+  const BUILDING = isMetric(units) ? 50 : 48;   // plans, elevations and sections no larger than 1:50 or a quarter inch to the foot
   const sheets = [];
   // plans: one level a sheet
   (input.plans || []).forEach((p, i) => {
@@ -226,14 +246,14 @@ export function buildSet(input, { paper = 'tabloid', units = 'ftin', project = '
   if (els.length) {
     const ratio = Math.max(...els.map((e) => scaleFor(e.view.bounds.x1 - e.view.bounds.x0 + 1000, e.view.bounds.y1 - e.view.bounds.y0 + 1000, roomFor(2), units, BUILDING).ratio));
     for (let i = 0; i < els.length; i += 2) {
-      const cells = els.slice(i, i + 2).map((e) => drawCell(e.title, pad(e.view.bounds, 500), units, (P, k) => viewItems(e.view, P, k), ratio));
+      const cells = els.slice(i, i + 2).map((e) => drawCell(e.title, pad(e.view.bounds, e.view.crop?0:500), units, (P, k) => viewItems(e.view, P, k), e.view.scale || ratio));
       sheets.push(sheet('A-2' + String(i / 2 + 1).padStart(2, '0'), tr('res.sh.elevations'), cells, opts));
     }
   }
   // sections: two a sheet
   const secs = (input.sections || []).filter((e) => e.view?.bounds);
   for (let i = 0; i < secs.length; i += 2) {
-    const cells = secs.slice(i, i + 2).map((e) => drawCell(e.title, pad(e.view.bounds, 500), units, (P, k) => viewItems(e.view, P, k), null, BUILDING));
+    const cells = secs.slice(i, i + 2).map((e) => drawCell(e.title, pad(e.view.bounds, e.view.crop?0:500), units, (P, k) => viewItems(e.view, P, k), e.view.scale || null, BUILDING));
     sheets.push(sheet('A-3' + String(i / 2 + 1).padStart(2, '0'), tr('res.sh.sections'), cells, opts));
   }
   // schedules: side by side, as many columns as the paper's width takes; a table taller than the sheet goes on in the next
@@ -241,7 +261,10 @@ export function buildSet(input, { paper = 'tabloid', units = 'ftin', project = '
   const perSheet = Math.max(1, Math.min(4, Math.floor((PW - 20) / 130)));
   const fit = Math.max(4, Math.floor((PH - 20 - 18 - 22) / 5) - 3);
   const pieces = [];
-  for (const sc of (input.schedules || []).filter((x) => x.rows.length)) {
+  for (const sc of (input.schedules || []).filter((x) => x.document)) {
+    sheets.push(sheet('A-6'+String(sheets.length+1).padStart(2,'0'),sc.title,[{title:sc.title,draw:(x,y,w,h)=>documentItems(sc,x+(w-sc.document.width)/2,y+h)}],opts));
+  }
+  for (const sc of (input.schedules || []).filter((x) => !x.document && x.rows.length)) {
     for (let r = 0; r < sc.rows.length; r += fit) {
       const last = r + fit >= sc.rows.length;
       pieces.push({ title: r ? tr('res.sh.continued', { title: sc.title }) : sc.title, head: sc.head, rows: sc.rows.slice(r, r + fit), total: last ? sc.total : null });
@@ -266,11 +289,14 @@ const pad = (b, p) => ({ x0: b.x0 - p, y0: b.y0 - p, x1: b.x1 + p, y1: b.y1 + p 
  *  scale (1:ratio; 0 = the plan's own scale (DC.117), else the largest standard scale that fits a third of the sheet), drawn from `input` as buildSet's (plans,
  *  elevations, sections, schedules carry `ref`). → { number, title, items, views: [{ i, kind, ref, box [x0, y0, x1, y1],
  *  ratio, label }], missing: [index of views whose drawing is gone] }. */
+/** 0.8 EG.56: where the keynote legend sits on a sheet: a column down the right margin, 66 mm wide (arrangeSheet keeps the views out of it). */
+export const LEGEND_W = 70;
+export const legendBlock = (paper) => { const [PW, PH] = PAPERS[paper] || PAPERS.tabloid; return { x: PW - 16 - LEGEND_W + 4, y: PH - 22 }; };
 export function composeSheet(spec, input, { paper = 'tabloid', units = 'ftin', project = '', date = '' } = {}) {
   const [PW, PH] = PAPERS[paper] || PAPERS.tabloid;
   const s = sheet(spec.number || '', spec.title || '', [], { paper, project, date });
   s.views = []; s.missing = [];
-  const label = (r) => (SCALES[units] || SCALES.ftin).find((x) => x[0] === r)?.[1] || '1:' + r;   // i18n-ignore: a scale ratio
+  const label = (r) => SCALES[isMetric(units) ? 'mm' : 'ftin'].find((x) => x[0] === r)?.[1] || '1:' + r;   // i18n-ignore: a scale ratio
   const find = (kind, ref) => ((kind === 'plan' ? input.plans : kind === 'rcp' ? input.rcps : kind === 'callout' ? input.callouts : kind === 'elevation' ? input.elevations : kind === 'interior' ? input.interiors : kind === 'section' ? input.sections : input.schedules) || []).find((x) => x.ref === ref);
   const planLike = (kind) => kind === 'plan' || kind === 'rcp' || kind === 'callout';   // 0.6 DC.117: a ceiling plan and a callout draw as a plan
   (spec.views || []).forEach((v, i) => {
@@ -278,27 +304,58 @@ export function composeSheet(spec, input, { paper = 'tabloid', units = 'ftin', p
     if (!src) { s.missing.push(i); return; }
     let w, h, draw, ratio = 0;
     if (v.kind === 'schedule') {
-      w = 130; h = 5 * (src.rows.length + 1 + (src.total ? 1 : 0));
-      draw = (x0, y0) => tableItems(src, x0, y0 + h, w).items;
+      w = src.document?.width || 130; h = src.document?.height || 5 * (src.rows.length + 1 + (src.total ? 1 : 0));
+      draw = (x0, y0) => src.document ? documentItems(src,x0,y0+h) : tableItems(src, x0, y0 + h, w).items;
     } else {
-      const bb = planLike(v.kind) ? boundsOfScene(src.scene) : src.view?.bounds ? pad(src.view.bounds, 500) : null;
+      const bb = planLike(v.kind) ? boundsOfScene(src.scene) : src.view?.bounds ? pad(src.view.bounds, src.view.crop?0:500) : null;
       if (!bb) { s.missing.push(i); return; }
       const W = bb.x1 - bb.x0, H = bb.y1 - bb.y0;
       // 1:ratio as placed; else the view's own scale (0.6 DC.117); else the largest standard scale that fits a third of the sheet
-      ratio = v.ratio > 0 ? v.ratio : src.scene?.scale > 0 ? src.scene.scale : scaleFor(W, H, [PW / 3, PH / 3], units, units === 'mm' ? 50 : 48).ratio;
+      ratio = v.ratio > 0 ? v.ratio : src.scene?.scale > 0 ? src.scene.scale : src.view?.scale > 0 ? src.view.scale : scaleFor(W, H, [PW / 3, PH / 3], units, isMetric(units) ? 50 : 48).ratio;
       const k = 1 / ratio;
       w = W * k; h = H * k;
       draw = (x0, y0) => { const P = at(k, x0 - bb.x0 * k, y0 - bb.y0 * k); return planLike(v.kind) ? planItems(src.scene, P, k) : viewItems(src.view, P, k); };
     }
     const x0 = v.x - w / 2, y0 = v.y - h / 2;
     s.items.push(...draw(x0, y0));
+    if(src.document){
+      const prefix=v.ref.split(':')[0]+':',omitted=input.schedules.filter(p=>p.ref.startsWith(prefix)&&!spec.views.some(v=>v.kind==='schedule'&&v.ref===p.ref));
+      if(omitted.length)s.items.push({t:'text',s:tr('asched.omitted',{n:omitted.length}),x:x0,y:y0-12,size:8,align:'left'});
+    }
     // its title under it, underlined, the scale under that (as the set's cells)
     s.items.push({ t: 'text', s: src.title, x: x0, y: y0 - 6, size: 9, align: 'left', bold: true });
     s.items.push({ t: 'line', pts: [[x0, y0 - 7], [x0 + Math.min(w, 90), y0 - 7]], w: 0.35, g: 0 });
     if (ratio) s.items.push({ t: 'text', s: label(ratio), x: x0, y: y0 - 10, size: 7, align: 'left', g: 0.25 });
     s.views.push({ i, kind: v.kind, ref: v.ref, box: [x0, y0, x0 + w, y0 + h], ratio, label: ratio ? label(ratio) : '' });
   });
+  if (spec.legend?.length) { const at = legendBlock(paper); s.items.push(...legendItems(spec.legend, { ...at, title: spec.legendTitle || 'Keynotes' })); }   // i18n-ignore: the default heading; the editor passes the translated one
   return s;
+}
+/** 0.8 EG.56: "Arrange for me". Picks ONE standard scale for the sheet's drawn views (the largest from the list, but never larger than 1:48 / 1:50, at which every
+ *  view fits the free area) and shelf-packs them: tallest first, left to right, each row's views sharing a baseline, a label strip under every view.
+ *  Schedules keep their size. → { views (the spec's views with new x, y, ratio), ratio, label, fits, rows }. Nothing is dropped: if even the smallest scale
+ *  does not fit, `fits` is false and the views run past the top (the person changes the paper). */
+export function arrangeSheet(spec, input, { paper = 'tabloid', units = 'ftin', gap = 8 } = {}) {
+  const [PW, PH] = PAPERS[paper] || PAPERS.tabloid;
+  const left = 16, right = PW - 16 - (spec.legend?.length ? LEGEND_W : 0), bottom = 10 + 18 + 6, top = PH - 14, strip = 14;
+  const list = SCALES[isMetric(units) ? 'mm' : 'ftin'].map(([r, l]) => ({ ratio: r, label: l })).filter((x) => x.ratio >= (isMetric(units) ? 50 : 48)).sort((a, b) => a.ratio - b.ratio);
+  const attempt = (ratio) => {
+    const v2 = (spec.views || []).map((v) => ({ ...v, ratio: v.kind === 'schedule' ? 0 : ratio }));
+    const c = composeSheet({ ...spec, views: v2 }, input, { paper, units });
+    const items = c.views.map((x) => ({ i: x.i, w: x.box[2] - x.box[0], h: x.box[3] - x.box[1] })).sort((a, b) => b.h - a.h || a.i - b.i);
+    let x = left, y = bottom, rowH = 0, rows = 1;
+    for (const it of items) {
+      if (x > left && x + it.w > right) { x = left; y += rowH + strip + gap; rowH = 0; rows++; }
+      it.x0 = x; it.y0 = y + strip; x += it.w + gap; rowH = Math.max(rowH, it.h);
+    }
+    const used = y + strip + rowH;
+    for (const it of items) { const v = v2[it.i]; v.x = Math.round((it.x0 + it.w / 2) * 10) / 10; v.y = Math.round((it.y0 + it.h / 2) * 10) / 10; }
+    return { views: v2, fits: used <= top && items.every((it) => it.w <= right - left), rows };
+  };
+  let pick = null;
+  for (const sc of list) { const r = attempt(sc.ratio); if (r.fits) { pick = { ...r, ratio: sc.ratio, label: sc.label }; break; } }
+  if (!pick) { const sc = list[list.length - 1] || { ratio: 100, label: '1:100' }; pick = { ...attempt(sc.ratio), ratio: sc.ratio, label: sc.label }; }
+  return pick;
 }
 /** A sheet with its frame and title block and nothing in it (the caller adds items). */
 export const blankSheet = (number, title, opts = {}) => sheet(number, title, [], { paper: 'tabloid', ...opts });
@@ -307,7 +364,7 @@ export function planSheet(number, title, scene, { paper = 'tabloid', units = 'ft
   let bb = boundsOfScene(scene);
   for (const q of extra) { if (!bb) bb = { x0: q[0] - 1000, y0: q[1] - 1000, x1: q[0] + 1000, y1: q[1] + 1000 }; bb = { x0: Math.min(bb.x0, q[0] - 300), y0: Math.min(bb.y0, q[1] - 300), x1: Math.max(bb.x1, q[0] + 300), y1: Math.max(bb.y1, q[1] + 300) }; }
   if (!bb) return null;
-  const c = drawCell(title, bb, units, (P, k) => planItems(scene, P, k), null, units === 'mm' ? 50 : 48);
+  const c = drawCell(title, bb, units, (P, k) => planItems(scene, P, k), null, isMetric(units) ? 50 : 48);
   const s = sheet(number, title, [c], { paper, project, date });
   s.place = s.views[0].place;
   return s;
@@ -328,11 +385,13 @@ function lit(s) {
   return '(' + out + ')';
 }
 const num = (v) => { const s = (Math.abs(v) < 5e-5 ? 0 : v).toFixed(3); return s.replace(/\.?0+$/, '') || '0'; };
-function pageOps(items) {
+const coord = v => String(Number(v.toFixed(6)));
+function pageOps(items, names = new Map()) {
   const ops = ['1 J 1 j'];
   for (const it of items) {
-    if (it.t === 'fill') { ops.push(num(it.g) + ' g'); for (const p of it.polys) { p.forEach((q, i) => ops.push(num(q[0] * PT) + ' ' + num(q[1] * PT) + (i ? ' l' : ' m'))); ops.push('h'); } ops.push('f*'); }
-    else if (it.t === 'line') { ops.push(num(it.w * PT) + ' w ' + num(it.g || 0) + ' G ' + (it.dash ? '[' + it.dash.map((d) => num(d * PT)).join(' ') + '] 0 d' : '[] 0 d')); it.pts.forEach((q, i) => ops.push(num(q[0] * PT) + ' ' + num(q[1] * PT) + (i ? ' l' : ' m'))); ops.push('S'); }
+    if (it.t === 'image') { const nm = names.get(it); if (nm) ops.push(PDFI.drawOps({ im: nm.im, gs: nm.gs, cm: PDFI.unitMatrix(it.m, it.w, it.h).map((v) => v * PT) })); continue; }
+    if (it.t === 'fill') { ops.push(it.color ? colorRgb(it.color).map(coord).join(' ') + ' rg' : num(it.g) + ' g'); for (const p of it.polys) { p.forEach((q, i) => ops.push(coord(q[0] * PT) + ' ' + coord(q[1] * PT) + (i ? ' l' : ' m'))); ops.push('h'); } ops.push('f*'); }
+    else if (it.t === 'line') { ops.push(num(it.w * PT) + ' w ' + (it.color ? colorRgb(it.color).map(coord).join(' ') + ' RG ' : num(it.g || 0) + ' G ') + (it.dash ? '[' + it.dash.map((d) => num(d * PT)).join(' ') + '] 0 d' : '[] 0 d')); it.pts.forEach((q, i) => ops.push(coord(q[0] * PT) + ' ' + coord(q[1] * PT) + (i ? ' l' : ' m'))); ops.push('S'); }
     else if (it.t === 'clip') { const [x0, y0, x1, y1] = it.rect; ops.push('q ' + [x0, y0, x1 - x0, y1 - y0].map((v) => num(v * PT)).join(' ') + ' re W n'); }   // i18n-ignore: PDF operators
     else if (it.t === 'unclip') ops.push('Q');
     else if (it.t === 'text') {
@@ -346,8 +405,23 @@ export function setPdf(sheets, { paper = 'tabloid', title = '', attach = null } 
   const [PW, PH] = PAPERS[paper] || PAPERS.tabloid;
   const enc = (s) => Uint8Array.from(String(s), (c) => c.charCodeAt(0) & 0xff);
   const n = sheets.length, objs = [];
-  // 1 catalog, 2 pages, 3 F1, 4 F2, 5 info, then a page + its contents for each sheet, then an attachment's file spec + stream
+  // 1 catalog, 2 pages, 3 F1, 4 F2, 5 info, then a page + its contents for each sheet, then an attachment's file spec + stream,
+  // then (0.8 D8.8 round 5) each picture's image objects and opacity states
   const fsNo = 6 + 2 * n;
+  let next = fsNo + (attach ? 2 : 0);
+  const names = new Map(), pageRes = [], imgObjs = [];
+  sheets.forEach((s, i) => {
+    const xo = [], gs = [];
+    for (const it of s.items) {
+      if (it.t !== 'image' || !it.image) continue;
+      const k = imgObjs.length, made = PDFI.imageObjects(it.image, next);
+      const nm = { im: 'Im' + k, gs: null };
+      xo.push('/' + nm.im + ' ' + next + ' 0 R'); imgObjs.push(...made.objs); next += made.objs.length;
+      if ((it.opacity ?? 1) < 1) { nm.gs = 'GS' + k; gs.push('/' + nm.gs + ' ' + next + ' 0 R'); imgObjs.push({ dict: PDFI.gsDict(it.opacity), data: null }); next += 1; }
+      names.set(it, nm);
+    }
+    pageRes[i] = (xo.length ? ' /XObject << ' + xo.join(' ') + ' >>' : '') + (gs.length ? ' /ExtGState << ' + gs.join(' ') + ' >>' : '');
+  });
   objs.push('<< /Type /Catalog /Pages 2 0 R' + (attach ? ` /Names << /EmbeddedFiles << /Names [${lit(attach.name)} ${fsNo} 0 R] >> >>` : '') + ' >>');
   objs.push('<< /Type /Pages /Kids [' + sheets.map((_, i) => (6 + 2 * i) + ' 0 R').join(' ') + '] /Count ' + n + ' >>');
   objs.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
@@ -355,14 +429,18 @@ export function setPdf(sheets, { paper = 'tabloid', title = '', attach = null } 
   objs.push('<< /Title ' + lit(title) + ' /Producer (BimCraft) >>');   // i18n-ignore: PDF metadata (the program's name)
   const streams = [], streamHead = [];
   sheets.forEach((s, i) => {
-    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(PW * PT)} ${num(PH * PT)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${7 + 2 * i} 0 R >>`);
-    const body = enc(pageOps(s.items));
+    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(PW * PT)} ${num(PH * PT)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >>${pageRes[i]} >> /Contents ${7 + 2 * i} 0 R >>`);
+    const body = enc(pageOps(s.items, names));
     objs.push(null); streams[objs.length - 1] = body;
   });
   if (attach) {
     objs.push(`<< /Type /Filespec /F ${lit(attach.name)} /UF ${lit(attach.name)} /Desc ${lit(attach.desc || '')} /EF << /F ${fsNo + 1} 0 R >> >>`);
     objs.push(null); streams[objs.length - 1] = attach.bytes;
     streamHead[objs.length - 1] = `/Type /EmbeddedFile /Subtype /${String(attach.mime || 'application/octet-stream').replace(/\//g, '#2F')} /Params << /Size ${attach.bytes.length} >> `;
+  }
+  for (const o of imgObjs) {
+    if (o.data) { objs.push(null); streams[objs.length - 1] = o.data; streamHead[objs.length - 1] = o.dict + ' '; }
+    else objs.push(o.dict);
   }
   const parts = [], offs = [];
   let size = 0;
@@ -383,18 +461,19 @@ export function setPdf(sheets, { paper = 'tabloid', title = '', attach = null } 
 export function sheetSvg(s, { paper = 'tabloid' } = {}) {
   const [PW, PH] = PAPERS[paper] || PAPERS.tabloid;
   const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const Y = (y) => (PH - y).toFixed(2), X = (x) => x.toFixed(2);
+  const Y = (y) => coord(PH - y), X = coord;
   const grey = (g) => { const v = Math.round((g || 0) * 255); return 'rgb(' + v + ',' + v + ',' + v + ')'; };
   const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${PW} ${PH}" width="${PW}mm" height="${PH}mm"><rect width="${PW}" height="${PH}" fill="#fff"/>`];
   let clips = 0;
   for (const it of s.items) {
     if (it.t === 'clip') { const [x0, y0, x1, y1] = it.rect, id = 'cc-crop-' + (clips++); out.push(`<clipPath id="${id}"><rect x="${X(x0)}" y="${Y(y1)}" width="${(x1 - x0).toFixed(2)}" height="${(y1 - y0).toFixed(2)}"/></clipPath><g clip-path="url(#${id})">`); continue; }
     if (it.t === 'unclip') { out.push('</g>'); continue; }
-    if (it.t === 'fill') out.push(`<path fill-rule="evenodd" fill="${grey(it.g)}" d="${it.polys.map((p) => 'M' + p.map((q) => X(q[0]) + ',' + Y(q[1])).join('L') + 'Z').join('')}"/>`);
-    else if (it.t === 'line') out.push(`<polyline fill="none" stroke="${grey(it.g)}" stroke-width="${it.w}" stroke-linecap="round" stroke-linejoin="round"${it.dash ? ' stroke-dasharray="' + it.dash.join(' ') + '"' : ''} points="${it.pts.map((q) => X(q[0]) + ',' + Y(q[1])).join(' ')}"/>`);
+    if (it.t === 'image') { const m = it.m, f = [m[0], -m[1], m[2], -m[3], m[4], PH - m[5]].map(coord).join(' '); out.push(it.href ? `<image href="${it.href}" width="${it.w}" height="${it.h}" opacity="${it.opacity ?? 1}" transform="matrix(${f})"/>` : `<rect width="${it.w}" height="${it.h}" fill="none" stroke="#888" stroke-width="${coord(1 / Math.max(1e-6, Math.abs(m[0])))}" transform="matrix(${f})"/>`); continue; }
+    if (it.t === 'fill') out.push(`<path fill-rule="evenodd" fill="${it.color || grey(it.g)}" d="${it.polys.map((p) => 'M' + p.map((q) => X(q[0]) + ',' + Y(q[1])).join('L') + 'Z').join('')}"/>`);
+    else if (it.t === 'line') out.push(`<polyline fill="none" stroke="${it.color || grey(it.g)}" stroke-width="${it.w}" stroke-linecap="round" stroke-linejoin="round"${it.dash ? ' stroke-dasharray="' + it.dash.join(' ') + '"' : ''} points="${it.pts.map((q) => X(q[0]) + ',' + Y(q[1])).join(' ')}"/>`);
     else if (it.t === 'text') {
       const anchor = it.align === 'left' ? 'start' : it.align === 'right' ? 'end' : 'middle', rot = -(it.rot || 0) * 180 / Math.PI;
-      out.push(`<text x="${X(it.x)}" y="${Y(it.y)}" font-family="Helvetica, Arial, sans-serif" font-size="${(it.size / PT).toFixed(2)}" font-weight="${it.bold ? 700 : 400}" fill="${grey(it.g)}" text-anchor="${anchor}"${rot ? ` transform="rotate(${rot.toFixed(2)} ${X(it.x)} ${Y(it.y)})"` : ''}>${esc(it.s)}</text>`);
+      out.push(`<text x="${X(it.x)}" y="${Y(it.y)}" font-family="Helvetica, Arial, sans-serif" font-size="${(it.size / PT).toFixed(2)}" font-weight="${it.bold ? 700 : 400}" fill="${it.color || grey(it.g)}" text-anchor="${anchor}"${rot ? ` transform="rotate(${rot.toFixed(2)} ${X(it.x)} ${Y(it.y)})"` : ''}>${esc(it.s)}</text>`);
     }
   }
   out.push('</svg>');

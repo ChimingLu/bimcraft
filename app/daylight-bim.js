@@ -19,8 +19,10 @@
  *                                     tris = Float64Array/array of 9 numbers per triangle (m, Z up)
  *   averageDF({ A, R, windows: [{ glazed, theta }] }, { T, M }) → %
  *   meanReflectance(areas {floor, wall, ceiling, glass}, refl {floor, wall, ceiling}) → R
- *   gatherRooms(W, api, mid) → { rooms: [{ id, guid, name, longName, storey, A, areas, windows: [{ id, guid, name, area, tag, n, origin, theta, blocked }] }],
- *                                unassigned: [window…], roof: [window…], skipped: n }   (geometry read once; θ measured here)
+ *   gatherRooms(W, api, mid, { keep }) → { rooms: [{ id, guid, name, longName, storey, A, areas, windows: [{ id, guid, name, area, tag, n, origin,
+ *                                theta, blocked, s, span: [lo, hi] along s from the origin, hz (height), host }] }], unassigned: [window…],
+ *                                roof: [window…], skipped: n, prods (keep: every product's { cls, tr, box }, not enumerable) }
+ *                                (geometry read once; θ measured here; the sky, sun, grid and energy analyses of 0.7 read the same)
  *   daylight(gathered, inputs) → rooms with { R, glazed per window, adf, band 'low'|'mid'|'high' }
  *   DEFAULTS = { T: 0.7, glazedShare: 0.75, M: 1, refl: { floor: 0.2, wall: 0.5, ceiling: 0.7 } }, GLASS_R = 0.1
  *   daylightCsv(rooms, { head, storeyName }) → text
@@ -162,7 +164,7 @@ export function facing(tr) {
   return [Math.cos(a), Math.sin(a)];
 }
 
-export function gatherRooms(W, api, mid, { onProgress = null } = {}) {
+export function gatherRooms(W, api, mid, { onProgress = null, keep = false } = {}) {
   const mm = lengthUnitMm(api, mid);
   const w = new ModelWriter(W, api, mid);
   const H = w.hostIndex();
@@ -258,7 +260,8 @@ export function gatherRooms(W, api, mid, { onProgress = null } = {}) {
     });
     const theta = sections.reduce((t, x) => t + x.theta, 0) / sections.length;
     const blocked = sections[2].blocked;   // the centre section's, for the detail
-    rooms.get(best.sid).windows.push({ ...base, area, n, origin, theta, blocked, sections: sections.map((x) => x.theta) });
+    // (0.7, bim-ops) the window's frame for the sky / sun / grid analyses: s across it, its span along s from the origin, its height, its host wall
+    rooms.get(best.sid).windows.push({ ...base, area, n, origin, theta, blocked, sections: sections.map((x) => x.theta), s: [s[0], s[1], 0], span: [sLo, sHi], hz: ext[2], host: host ?? null });
     onProgress?.(++done, windowIds.length);
   }
   for (const r of rooms.values()) {
@@ -266,7 +269,10 @@ export function gatherRooms(W, api, mid, { onProgress = null } = {}) {
     r.areas.glass = Math.min(g, r.areas.wall);
     r.areas.wall -= r.areas.glass;
   }
-  return { rooms: [...rooms.values()], unassigned, roof, skipped };
+  const out = { rooms: [...rooms.values()], unassigned, roof, skipped };
+  // (0.7, bim-ops) every product's triangles, for the sky, sun, grid and energy analyses that run on the same reading
+  if (keep) Object.defineProperty(out, 'prods', { value: prods, enumerable: false });
+  return out;
 }
 
 /** The result for these inputs (cheap: run again whenever an input changes). */

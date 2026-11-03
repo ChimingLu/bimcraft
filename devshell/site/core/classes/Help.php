@@ -82,7 +82,7 @@ final class Help
      */
     public static function compileApp(string $slug, string $helpDir): array
     {
-        $app = Catalog::app($slug);
+        $app = Catalog::anyApp($slug);
         $errors = $warnings = [];
         if (!$app) return ['data' => [], 'errors' => ["Unknown app $slug."], 'warnings' => []];
 
@@ -597,7 +597,7 @@ final class Help
         }
         if ($where === null) {
             return ['public' => false, 'where' => null,
-                'note' => $app['name'] . ' is in development and not open to the public yet. These pages describe the build the team is testing now, so they change as it does.'];
+                'note' => $app['name'] . ' is not open to the public yet. These pages describe the build the team is testing now, so they change as it does.'];
         }
         return ['public' => true, 'where' => $where,
             'note' => 'Written for ' . $app['name'] . ($build === 'dev' ? ' as it is today' : ' ' . $build) . '. The same help is inside the app: press F1.'];

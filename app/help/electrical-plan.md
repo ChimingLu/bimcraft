@@ -13,11 +13,13 @@ Draw the house's electrical plan in the model: outlets, switches and panels on t
 ## Place devices
 
 1. On a level, open {{ui:Build}} and choose {{ui:Electrical}}.
-2. Choose the device: outlets, switches and sensors, lights, a junction box or a panel.
+2. Choose the device: outlets (power, data, phone, audio-video), switches and sensors (a thermostat and a timer too), lights, detectors and alarms, a junction box, a panel or a sub-panel.
 3. Type a **Circuit** if you know it (any name: 1, 2, A-3). Leave **Mounting height** blank for the usual height of that device.
 4. Click on the plan. Outlets, switches and panels go on the face of the nearest wall, facing into the room; lights, sensors and junction boxes go on the ceiling where you click.
 
 Devices are tagged as you place them: **R** for outlets, **S** for switches, **L** for lights, **M** for motion sensors, **J** for junction boxes, **P** for panels. Devices on a wall move with it when you move the wall.
+
+Prefer to browse by picture? Open the **Symbol palette** from {{ui:Build}} to find a device by name, star the ones you use and place it with one click: see [The symbol palette](topic:symbol-palette).
 
 ## Link switches to lights
 

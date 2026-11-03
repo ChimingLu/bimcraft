@@ -34,7 +34,7 @@
  * CadCraft_LibraryItem, CadCraft_Equipment, CadCraft_SourceAttributes (the type gets CadCraft_LibraryItem).
  */
 import { ids, val, lengthUnitMm, productTriangles, inv4, apply4, mul4, deleteLine, restored, retypeLine, replaceLine } from './ifc-util.js';
-import { decodeElec, elecText, planBounds, boxFromPlan } from './libitem.js';
+import { decodeElec, elecText, planBounds, boxFromPlan, variantOf, itemAsVariant } from './libitem.js';
 import { t } from "./i18n.js";
 
 const D2R = Math.PI / 180;
@@ -57,6 +57,19 @@ export function classesFor(item, schema) {
   const row = CLASSES[c] || CLASSES.IfcBuildingElementProxy;
   const v4 = !/^IFC2X3/i.test(schema);
   return { requested: item?.ifc?.class || null, used: CLASSES[c] ? c : 'IfcBuildingElementProxy', occ: v4 ? row[0] : row[2], type: v4 ? row[1] : row[3] };
+}
+
+/**
+ * 0.7 W3.19: an item with `variants` is placed as one of them. `opts.variant` ({ id, … }) names it, else the item's default is
+ * used. → [the item read as that variant (its body, plan, ports; the name gets " — <variant>"), opts with variant { id, name, values }].
+ * Anything without variants comes back as it was.
+ */
+export function withVariant(item, opts = {}) {
+  if (!item || !item.variants) return [item, opts];
+  const row = variantOf(item, opts?.variant?.id ?? null);
+  if (!row) return [item, opts];
+  const one = itemAsVariant(item, row.id, { named: true });
+  return [one, { ...opts, variant: { id: row.id, name: row.name, values: row.values || {} } }];
 }
 
 export class IfcPlacer {
@@ -167,7 +180,7 @@ export class IfcPlacer {
         const lib = this.typePsets(id)[PSETS.library];
         if (!lib) continue;
         const p = lib.props;
-        const key = p.ItemUuid?.value ? p.ItemUuid.value + '@' + p.ItemVersion?.value : 'sha:' + (p.ItemSha256?.value || '');
+        const key = p.ItemUuid?.value ? p.ItemUuid.value + '@' + p.ItemVersion?.value + (p.Variant?.value ? '#' + p.Variant.value : '') : 'sha:' + (p.ItemSha256?.value || '');   // 0.7 W3.19: one type per variant
         if (!out.has(key)) out.set(key, id);
       }
     }
@@ -189,6 +202,7 @@ export class IfcPlacer {
         x: Wm ? Wm[12] * this.unitMm : 0, y: Wm ? Wm[13] * this.unitMm : 0, rot: Wm ? Math.round(Math.atan2(Wm[1], Wm[0]) / D2R * 1000) / 1000 : 0,
         itemNumber: String(pl.props.ItemNumber?.value ?? ''), quantity: pl.props.Quantity?.value ?? 1, notes: pl.props.Notes?.value || '',
         library: lib.Library?.value || '', uuid: lib.ItemUuid?.value || '', version: lib.ItemVersion?.value ?? null, sha256: lib.ItemSha256?.value || '',
+        variant: lib.Variant?.value || '', variantName: lib.VariantName?.value || '',   // 0.7 W3.19: the library item's variant this placement is
         license: lib.License?.value || '', attribution: lib.Attribution?.value || '', sourceFile: lib.SourceFile?.value || '',
         equipment: Object.fromEntries(Object.entries(eq).map(([k, v]) => [k, v.value])),
       });
@@ -216,7 +230,8 @@ export class IfcPlacer {
       const k = String(val(c.ContextIdentifier) || '').toLowerCase();
       if (k && !subs.has(k)) subs.set(k, id);
     }
-    const sub = (name, view) => subs.get(name.toLowerCase()) || this.make('IFCGEOMETRICREPRESENTATIONSUBCONTEXT', this.L(name), this.L('Model'), this.H(model), null, this.E(view), null);
+    const derived = { type: this.W.UNKNOWN, value: null, derived: true };
+    const sub = (name, view) => subs.get(name.toLowerCase()) || this.make('IFCGEOMETRICREPRESENTATIONSUBCONTEXT', this.L(name), this.L('Model'), derived, derived, derived, derived, this.H(model), null, this.E(view), null);
     this._ctx = { body: sub('Body', 'MODEL_VIEW'), foot: sub('FootPrint', 'MODEL_VIEW'), clear: null, model, sub };
     return this._ctx;
   }
@@ -304,7 +319,7 @@ export class IfcPlacer {
 
   /** The type for an item: shared by uuid@version (or sha256); created with its representation maps and LibraryItem pset. */
   typeFor(item, opts) {
-    const key = item.uuid ? item.uuid + '@' + item.version : 'sha:' + (opts.sha256 || item.provenance?.sha256 || '');
+    const key = item.uuid ? item.uuid + '@' + item.version + (opts.variant?.id ? '#' + opts.variant.id : '') : 'sha:' + (opts.sha256 || item.provenance?.sha256 || '');
     const known = this.libraryTypes().get(key);
     if (known) return { id: known, created: false };
     const ctx = this.contexts();
@@ -345,7 +360,7 @@ export class IfcPlacer {
 
   libraryProps(item, opts) {
     const lic = item.license || {};
-    return [
+    const rows = [
       ['Library', 'IFCLABEL', opts.library || item.provenance?.library || (item.uuid ? 'librarycraft' : 'file')],
       ['ItemUuid', 'IFCIDENTIFIER', item.uuid || ''],
       ['ItemVersion', 'IFCINTEGER', item.version ?? 0],
@@ -354,6 +369,12 @@ export class IfcPlacer {
       ['Attribution', 'IFCTEXT', lic.attribution || ''],
       ['SourceFile', 'IFCLABEL', opts.sourceFile || item.provenance?.source_file || ''],
     ];
+    // 0.7 W3.19: the chosen variant of an item with variants (its id, its name, and its option values as text)
+    if (opts.variant?.id) {
+      rows.push(['Variant', 'IFCIDENTIFIER', String(opts.variant.id)], ['VariantName', 'IFCLABEL', String(opts.variant.name || opts.variant.id)],
+        ['VariantValues', 'IFCTEXT', Object.entries(opts.variant.values || {}).map(([k, v]) => k + '=' + v).join('; ')]);
+    }
+    return rows;
   }
   equipmentProps(item) {
     const p = item.params || {}, out = [['Name', 'IFCLABEL', item.name], ['Maker', 'IFCLABEL', item.maker || ''], ['Model', 'IFCLABEL', item.model || ''], ['Category', 'IFCLABEL', item.category || '']];
@@ -386,6 +407,7 @@ export class IfcPlacer {
 
   // ---- placing ----
   place(item, opts) {
+    [item, opts] = withVariant(item, opts);
     this.begin();
     const st = this.storeyLine(opts.storey);
     const type = this.typeFor(item, opts);
@@ -482,7 +504,10 @@ export class IfcPlacer {
   relateType(id, typeId) {
     for (const rid of ids(this.api, this.mid, 'IFCRELDEFINESBYTYPE')) {
       const r = this.api.GetLine(this.mid, rid, false);
-      if (r.RelatingType?.value === typeId) { const l = this.touch(rid); l.RelatedObjects = [...l.RelatedObjects, this.H(id)]; this.write(l); return rid; }
+      if (r.RelatingType?.value === typeId) {
+        if ((r.RelatedObjects || []).some(h => h.value === id)) return rid;
+        const l = this.touch(rid); l.RelatedObjects = [...l.RelatedObjects, this.H(id)]; this.write(l); return rid;
+      }
     }
     return this.make('IFCRELDEFINESBYTYPE', this.guid(), this.ownerHistory(), null, null, [this.H(id)], this.H(typeId));
   }
@@ -502,6 +527,7 @@ export class IfcPlacer {
    * PredefinedType becomes NOTDEFINED. The journal holds the old line, so undo brings the old class back.
    */
   swap(id, item, opts = {}) {
+    [item, opts] = withVariant(item, opts);
     this.begin();
     const type = this.typeFor(item, opts);
     const rt = this.relTypeOf().get(id);

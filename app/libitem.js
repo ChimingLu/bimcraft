@@ -15,6 +15,9 @@
  *   boxFromPlan(plan, h, z = 0)     → { type:'box', x, y, z, w, d, h } | null
  *   paramsFromAttrs(attrs, { mmPerUnit }) → params (canonical fields) from KCL-style / plain attributes
  *   attrsInfo(attrs)                → { maker, model, title, itemNo, qty } (item number and quantity belong to a placement)
+ *   variantList(item) / variantOf(item, id) / itemAsVariant(item, id)   0.7 W3.19: an item with `variants` read as its variants
+ *   portsOf(item, variant?)         → the item's ports, or the variant's own when it has them
+ *   bodyBox(body)                   → { x, y, z, w, d, h } of a box body or a mesh body's extent, null without a body
  *   decodeElec / elecText / plumbSize — the KCL field decoders (dwg-equipment.js uses these)
  *
  * Adapters — each returns { items, notes } (notes: plain sentences; nothing is guessed silently):
@@ -73,6 +76,10 @@ export const MESSAGES = {
   'libitem.cat.symbols.plumbing': 'Plumbing symbols',
   'libitem.cat.details.generic': 'Details',
   'libitem.cat.other.other': 'Other',
+  'libitem.cat.regulations.building': 'Building regulations',
+  'libitem.cat.components.process': 'Process components',
+  'libitem.cat.plants.species': 'Plants',
+  'libitem.cat.templates.specification': 'Document templates',
   'libitem.v.not_object': 'not a JSON object',
   'libitem.v.not_json': 'cannot be written as JSON',
   'libitem.v.too_large': 'larger than 8 MB',
@@ -116,6 +123,45 @@ export const MESSAGES = {
   'libitem.v.locale': 'is not a language tag (like es or es-MX)',
   'libitem.v.locales': 'has more than 40 languages',
   'libitem.v.label_key': 'is not a parameter key',
+  'libitem.v.port_system': 'must be one of {list}',
+  'libitem.v.port_direction': 'must be in, out or both',
+  'libitem.v.port_shape': 'must be round, rect or oval',
+  'libitem.v.port_axis': 'must be [x, y, z] with a length above 0',
+  'libitem.v.port_nominal': 'must be 1–20 characters, like 2 or DN50',
+  'libitem.v.too_many_items': 'has more than {n} entries',
+  'libitem.v.duplicate': 'is used twice',
+  'libitem.v.variant_id': 'must be 1–60 letters, digits, dots, dashes or underscores',
+  'libitem.v.variant_columns': 'needs at least one column',
+  'libitem.v.variant_rows': 'needs at least one variant',
+  'libitem.v.variant_value': 'must be a number or text',
+  'libitem.v.variant_cell_extra': 'has a value for "{key}", which is not a column',
+  'libitem.v.variant_cell_missing': 'has no value for the column "{key}"',
+  'libitem.v.variant_default': 'is not the id of a variant',
+  'libitem.v.variants_material': 'a material has no variants',
+  'libitem.v.regulation_kind': 'only an item of kind regulation has one',
+  'libitem.v.regulation_pack': 'is not a building regulation pack (format cadcraft-regulation-pack, version 1, an id and a list of at most 200 rules)',
+  'libitem.v.regulation_big': 'is larger than 256 KB',
+  'libitem.v.regulation_body': 'must be null for a regulation pack',
+  'libitem.v.regulation_plan': 'must have no entities for a regulation pack',
+  'libitem.v.regulation_extra': 'a regulation pack has no ports or variants',
+  'libitem.v.component_kind': 'only an item of kind component has one',
+  'libitem.v.component_required': 'is required for a component',
+  'libitem.v.component_body': 'must be null for a component',
+  'libitem.v.component_plan': 'must have no entities for a component',
+  'libitem.v.component_extra': 'a component has no ports or variants',
+  'libitem.v.component_bad': 'a component record: {what}',
+  'libitem.v.plant_kind': 'only an item of kind plant has one',
+  'libitem.v.plant_required': 'is required for a plant',
+  'libitem.v.plant_body': 'must be null for a plant',
+  'libitem.v.plant_plan': 'must have no entities for a plant',
+  'libitem.v.plant_extra': 'a plant has no ports or variants',
+  'libitem.v.plant_bad': 'a plant record: {what}',
+  'libitem.v.template_kind': 'only an item of kind template has one',
+  'libitem.v.template_required': 'is required for a template',
+  'libitem.v.template_body': 'must be null for a template',
+  'libitem.v.template_plan': 'must have no entities for a template',
+  'libitem.v.template_extra': 'a template has no ports or variants',
+  'libitem.v.template_bad': 'a document template: {what}',
   'libitem.elec.direct': 'direct connection',
   'libitem.elec.plug': 'cord and plug',
   'libitem.elec.plug_nema': 'cord and plug {nema}',
@@ -196,12 +242,42 @@ for (const k of [
   'foodservice/ice', 'foodservice/serving', 'foodservice/other', 'furniture/seating', 'furniture/tables',
   'furniture/desks', 'furniture/storage', 'furniture/beds', 'furniture/other', 'casework/base', 'casework/wall',
   'casework/tall', 'plumbing/fixtures', 'plumbing/equipment', 'electrical/fixtures', 'electrical/equipment',
-  'mechanical/equipment', 'appliances/residential', 'site/landscape', 'site/vehicles', 'people/entourage',
+  'mechanical/equipment', 'mechanical/parts', 'structural/steel', 'appliances/residential', 'site/landscape', 'site/vehicles', 'people/entourage',
   'symbols/annotation', 'symbols/electrical', 'symbols/plumbing', 'details/generic', 'other/other',
+  // 0.7 MT.3 (session `materials`): surface materials (kind material: a node graph + map pictures, no geometry)
+  'materials/brick', 'materials/wood', 'materials/stone', 'materials/tile', 'materials/concrete', 'materials/plaster', 'materials/metal',
+  'materials/roofing', 'materials/fabric', 'materials/ground', 'materials/other',
+  // 0.8 REG.1a: building regulation packs (kind regulation: a pack of numbers and clause numbers by jurisdiction, no geometry)
+  'regulations/building',
+  // 0.8 IND.7: process components (kind component: a record with its sources, cited properties, failure rates and review state)
+  'components/process',
+  // 0.8 LD.1: plants (kind plant: one species with its sizes, growth, light, water, soil, zone and source)
+  'plants/species',
+  // 0.8 SU.889: per-trade document templates (kind template: Markdown with fields, filled from the open IFC)
+  'templates/specification',
 ]) {
   Object.defineProperty(CATEGORIES, k, { enumerable: true, get: () => msg('libitem.cat.' + k.replace('/', '.')) });
 }
-export const KINDS = ['equipment', 'furniture', 'fixture', 'symbol', 'detail'];
+export const KINDS = ['equipment', 'furniture', 'fixture', 'symbol', 'detail', 'material', 'regulation', 'component', 'plant', 'template'];
+/** 0.8 IND.7: a component record's vocabulary. LibraryCatalog.php has the same lists. */
+export const COMPONENT = {
+  classes: ['substance', 'equipment', 'instrument', 'other'],
+  sourceKinds: ['textbook', 'standard', 'government-table', 'paper', 'manufacturer', 'user', 'community'],
+  rateUnits: ['per_hour', 'per_demand', 'per_year'],
+  suppliedBy: ['user', 'community'],
+  reviewStates: ['unchecked', 'draft', 'reviewed'],
+};
+/** 0.7 MT.3: a material item's map names (ModelCraft's shading/texset.js roles) and picture types; LibraryCatalog.php has the same. */
+export const MATERIAL_MAPS = ['color', 'roughness', 'gloss', 'metalness', 'normal', 'height', 'ao', 'opacity', 'emission'];
+export const MATERIAL_MEDIA = ['image/png', 'image/jpeg', 'image/webp'];
+/** 0.7 W3.19: a connection point of an item (ports) and the variants of one item (variants). Kept in step with LibraryItemFormat.php.
+ * Port systems are BimCraft's pipe and duct systems (mep-model.js PIPE_SYSTEMS, DUCT_SYSTEMS) plus 'other'. */
+export const PORT_SYSTEMS = ['cw', 'hw', 'hwr', 'san', 'vent', 'storm', 'chw', 'hhw', 'gas', 'fire', 'supply', 'return', 'exhaust', 'outside', 'other'];
+/** Flow direction at the port: into the item, out of it, or either way. */
+export const PORT_DIRECTIONS = ['in', 'out', 'both'];
+export const PORT_SHAPES = ['round', 'rect', 'oval'];
+export const VARIANT_LIMITS = { rows: 200, columns: 24, ports: 32 };
+const VARIANT_ID_RE = /^[A-Za-z0-9_.-]{1,60}$/;
 export const LICENSES = ['CC0-1.0', 'CC-BY-4.0', 'CC-BY-3.0', 'CC-BY-SA-4.0', 'MAKER-TERMS', 'TEAM-ONLY'];
 export const LIMITS = { bytes: 8 * 1024 * 1024, triangles: 200000, entities: 50000, text: 500, coord: 1e7 };
 /** Length units → mm. */
@@ -220,7 +296,162 @@ const ENTITY_KEYS = {
   ellipse: ['cx', 'cy', 'mx', 'my', 'ratio', 't0', 't1'], text: ['x', 'y', 'h', 'rot', 'value'], point: ['x', 'y'], hatch: ['loops', 'solid'],
 };
 const TOP_KEYS = ['format', 'format_version', 'uuid', 'version', 'name', 'kind', 'category', 'description', 'maker', 'model', 'ifc',
-  'plan', 'body', 'clearances', 'params', 'source_attrs', 'license', 'provenance', 'i18n'];
+  'plan', 'body', 'clearances', 'params', 'material', 'regulation', 'component', 'plant', 'template', 'source_attrs', 'license', 'provenance', 'i18n', 'ports', 'variants'];
+
+/**
+ * 0.8 IND.7: the shape of a component record (format cadcraft-component, version 1). Mirrors LibraryItemFormat::component: every
+ * property and failure rate cites a source row of the record; failure rates come only from a user or the community.
+ */
+function checkComponent(c, err) {
+  const bad = (p, what) => err(p, msg('libitem.v.component_bad', { what }));
+  const text = (p, v, required = false) => {
+    if (typeof v !== 'string') return bad(p, 'must be text');
+    if ([...v].length > 500) return bad(p, 'longer than 500 characters');
+    if (required && v.trim() === '') bad(p, 'is empty');
+  };
+  const plain = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const allowed = (p, o, names) => { for (const k of Object.keys(o)) if (!names.includes(k)) bad(p + '.' + k, 'is not part of the format'); };
+  allowed('component', c, ['format', 'version', 'id', 'class', 'formula', 'sources', 'properties', 'failure_data', 'review']);
+  if (c.format !== 'cadcraft-component') bad('component.format', 'must be cadcraft-component');
+  if (c.version !== 1) bad('component.version', 'must be 1');
+  if (typeof c.id !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,63}$/.test(c.id)) bad('component.id', 'must be a lower-case id (a-z, 0-9, dots and dashes)');
+  if (!COMPONENT.classes.includes(c.class)) bad('component.class', 'must be one of ' + COMPONENT.classes.join(', '));
+  if ('formula' in c) text('component.formula', c.formula);
+  const keys = new Set();
+  if (!Array.isArray(c.sources)) bad('component.sources', 'must be a list');
+  else if (c.sources.length > 40) bad('component.sources', 'at most 40 sources');
+  else c.sources.forEach((s, i) => {
+    const p = `component.sources[${i}]`;
+    if (!plain(s)) return bad(p, 'must be an object');
+    allowed(p, s, ['key', 'kind', 'title', 'url', 'date', 'note']);
+    if (typeof s.key !== 'string' || !/^[A-Za-z0-9._-]{1,32}$/.test(s.key)) bad(p + '.key', 'must be 1–32 letters, digits, dots, dashes or underscores');
+    else if (keys.has(s.key)) bad(p + '.key', 'is used twice');
+    else keys.add(s.key);
+    if (!COMPONENT.sourceKinds.includes(s.kind)) bad(p + '.kind', 'must be one of ' + COMPONENT.sourceKinds.join(', '));
+    text(p + '.title', s.title, true);
+    if ('url' in s && !(typeof s.url === 'string' && /^https:\/\//.test(s.url))) bad(p + '.url', 'must be an https link');
+    for (const k of ['date', 'note']) if (k in s) text(`${p}.${k}`, s[k]);
+  });
+  if (!Array.isArray(c.properties)) bad('component.properties', 'must be a list');
+  else if (c.properties.length > 120) bad('component.properties', 'at most 120 properties');
+  else c.properties.forEach((pr, i) => {
+    const p = `component.properties[${i}]`;
+    if (!plain(pr)) return bad(p, 'must be an object');
+    allowed(p, pr, ['key', 'value', 'unit', 'src', 'table']);
+    text(p + '.key', pr.key, true);
+    if (!(typeof pr.value === 'string' || (typeof pr.value === 'number' && Number.isFinite(pr.value)))) bad(p + '.value', 'must be a number or text');
+    if ('unit' in pr) text(p + '.unit', pr.unit);
+    if (!keys.has(pr.src)) bad(p + '.src', 'must name a source key of this record');
+    if ('table' in pr) text(p + '.table', pr.table);
+  });
+  const fd = c.failure_data ?? [];
+  if (!Array.isArray(fd)) bad('component.failure_data', 'must be a list');
+  else if (fd.length > 200) bad('component.failure_data', 'at most 200 failure rates');
+  else fd.forEach((f, i) => {
+    const p = `component.failure_data[${i}]`;
+    if (!plain(f)) return bad(p, 'must be an object');
+    allowed(p, f, ['mode', 'rate', 'unit', 'basis', 'source', 'supplied_by']);
+    text(p + '.mode', f.mode, true);
+    if (typeof f.rate !== 'number' || !Number.isFinite(f.rate) || f.rate < 0) bad(p + '.rate', 'must be a number, 0 or more');
+    if (!COMPONENT.rateUnits.includes(f.unit)) bad(p + '.unit', 'must be one of ' + COMPONENT.rateUnits.join(', '));
+    if ('basis' in f) text(p + '.basis', f.basis);
+    if (!keys.has(f.source)) bad(p + '.source', 'must name a source key of this record');
+    if (!COMPONENT.suppliedBy.includes(f.supplied_by)) bad(p + '.supplied_by', 'must be user or community: failure rates are never supplied by the system');
+  });
+  const r = c.review;
+  if (!plain(r) || !COMPONENT.reviewStates.includes(r.state)) bad('component.review', 'needs a state: unchecked, draft or reviewed');
+  else {
+    allowed('component.review', r, ['state', 'note', 'checked_by']);
+    if (r.state === 'reviewed' && String(r.checked_by ?? '').trim() === '') bad('component.review.checked_by', 'is required when reviewed');
+    if ('note' in r) text('component.review.note', r.note);
+  }
+}
+
+/** 0.8 SU.889: the shape of a document template (format cadcraft-doc-template, version 1). Mirrors LibraryItemFormat::template. */
+export const TEMPLATE = { tagKinds: ['text', 'integer', 'number', 'length', 'angle', 'yesno'], maxText: 65536 };
+function checkTemplate(c, err) {
+  const bad = (p, what) => err(p, msg('libitem.v.template_bad', { what }));
+  const plain = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  for (const k of Object.keys(c)) if (!['format', 'version', 'key', 'trade', 'title', 'tags', 'text'].includes(k)) bad('template.' + k, 'is not part of the format');
+  if (c.format !== 'cadcraft-doc-template') bad('template.format', 'must be cadcraft-doc-template');
+  if (c.version !== 1) bad('template.version', 'must be 1');
+  if (typeof c.key !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(c.key)) bad('template.key', 'must be a lower-case key (a-z, 0-9, dashes)');
+  for (const f of ['trade', 'title']) if (typeof c[f] !== 'string' || c[f].trim() === '' || [...c[f]].length > 120) bad('template.' + f, 'must be text of 1 to 120 characters');
+  if (typeof c.text !== 'string' || c.text.trim() === '') bad('template.text', 'is empty');
+  else if (new TextEncoder().encode(c.text).length > TEMPLATE.maxText) bad('template.text', 'is longer than ' + TEMPLATE.maxText + ' bytes');
+  else if (/<\s*(script|iframe|object|embed)/i.test(c.text)) bad('template.text', 'holds markup that a document cannot carry');
+  if (!Array.isArray(c.tags)) { bad('template.tags', 'must be a list'); return; }
+  if (c.tags.length > 40) bad('template.tags', 'at most 40 tag definitions');
+  c.tags.forEach((d, i) => {
+    const p = 'template.tags.' + i;
+    if (!plain(d)) { bad(p, 'must be an object'); return; }
+    for (const k of Object.keys(d)) if (!['name', 'kind', 'values', 'classes', 'note'].includes(k)) bad(p + '.' + k, 'is not part of the format');
+    if (typeof d.name !== 'string' || d.name.trim() === '' || [...d.name].length > 80) bad(p + '.name', 'must be text of 1 to 80 characters');
+    if (!TEMPLATE.tagKinds.includes(d.kind)) bad(p + '.kind', 'must be one of ' + TEMPLATE.tagKinds.join(', '));
+    for (const f of ['values', 'classes']) {
+      if (!(f in d)) continue;
+      if (!Array.isArray(d[f]) || d[f].length > 60) { bad(p + '.' + f, 'must be a list of at most 60'); continue; }
+      if (d[f].some((x) => !(typeof x === 'string' || typeof x === 'number') || String(x).length > 80)) bad(p + '.' + f, 'has a value that is not short text or a number');
+    }
+    if ('note' in d && typeof d.note !== 'string') bad(p + '.note', 'must be text');
+  });
+}
+/** 0.8 LD.1: the shape of a plant record (format cadcraft-plant, version 1). Mirrors LibraryItemFormat::plant. Lengths in metres. */
+export const PLANT = {
+  types: ['tree', 'shrub', 'hedge', 'grass', 'perennial', 'groundcover', 'climber'],
+  forms: ['broadleaf', 'conifer', 'columnar', 'palm', 'weeping', 'multistem', 'rounded', 'upright', 'spreading', 'mounded', 'clumping', 'turf', 'mat', 'vine', 'fern', 'succulent'],
+  foliage: ['evergreen', 'deciduous', 'semi'], growth: ['slow', 'medium', 'fast'], light: ['sun', 'part', 'shade'], water: ['low', 'medium', 'high'],
+  soils: ['any', 'well-drained', 'moist', 'wet', 'dry', 'sandy', 'loam', 'clay', 'chalk', 'acid', 'neutral', 'alkaline', 'saline'],
+  regions: ['temperate', 'mediterranean', 'subtropical', 'coastal'],
+  symbols: ['canopy', 'canopy-scallop', 'conifer', 'palm', 'shrub', 'grass', 'groundcover', 'climber', 'hedge'],
+};
+function checkPlant(c, err) {
+  const bad = (p, what) => err(p, msg('libitem.v.plant_bad', { what }));
+  const plain = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const text = (p, v, required = false) => {
+    if (typeof v !== 'string') return bad(p, 'must be text');
+    if ([...v].length > 500) return bad(p, 'longer than 500 characters');
+    if (required && v.trim() === '') bad(p, 'is empty');
+  };
+  const names = ['format', 'version', 'key', 'botanical', 'names', 'type', 'form', 'foliage', 'size', 'growth', 'light', 'water', 'soil', 'zone', 'spacing', 'container', 'region', 'notes', 'symbol', 'model', 'source'];
+  for (const k of Object.keys(c)) if (!names.includes(k)) bad('plant.' + k, 'is not part of the format');
+  if (c.format !== 'cadcraft-plant') bad('plant.format', 'must be cadcraft-plant');
+  if (c.version !== 1) bad('plant.version', 'must be 1');
+  if (typeof c.key !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(c.key)) bad('plant.key', 'must be a lower-case key (a-z, 0-9, dashes)');
+  text('plant.botanical', c.botanical, true);
+  if (!plain(c.names)) bad('plant.names', 'must be an object');
+  else {
+    if (Object.keys(c.names).length > 40) bad('plant.names', 'at most 40 languages');
+    for (const [l, n] of Object.entries(c.names)) {
+      if (!/^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$/.test(l)) bad('plant.names', 'is not a language tag (like es or es-MX)');
+      else text('plant.names.' + l, n);
+    }
+  }
+  const one = (f, allowed) => { if (!allowed.includes(c[f])) bad('plant.' + f, 'must be one of ' + allowed.join(', ')); };
+  one('type', PLANT.types); one('form', PLANT.forms); one('foliage', PLANT.foliage); one('growth', PLANT.growth); one('water', PLANT.water);
+  for (const [f, allowed] of [['light', PLANT.light], ['soil', PLANT.soils], ['region', PLANT.regions]]) {
+    if (!Array.isArray(c[f])) { bad('plant.' + f, 'must be a list'); continue; }
+    if (c[f].some((x) => !allowed.includes(x))) bad('plant.' + f, 'has a value that is not one of ' + allowed.join(', '));
+  }
+  const len = (p, v, max) => { if (typeof v !== 'number' || !(v > 0) || v > max) bad(p, `must be a number above 0 and at most ${max}`); };
+  if (!plain(c.size)) bad('plant.size', 'must be an object');
+  else {
+    for (const k of Object.keys(c.size)) if (!['plant', 'mature'].includes(k)) bad('plant.size.' + k, 'is not part of the format');
+    if (!plain(c.size.mature)) bad('plant.size.mature', 'must be an object');
+    else { len('plant.size.mature.h', c.size.mature.h, 150); len('plant.size.mature.s', c.size.mature.s, 60); }
+    if (c.size.plant != null) {
+      if (!plain(c.size.plant)) bad('plant.size.plant', 'must be an object');
+      else { len('plant.size.plant.h', c.size.plant.h, 150); len('plant.size.plant.s', c.size.plant.s, 60); }
+    }
+  }
+  if (c.zone != null) {
+    if (!plain(c.zone)) bad('plant.zone', 'must be an object');
+    else if (!Number.isInteger(c.zone.min) || !Number.isInteger(c.zone.max) || c.zone.min < 1 || c.zone.max > 13 || c.zone.min > c.zone.max) bad('plant.zone', 'needs whole USDA zones 1 to 13, min not above max');
+  }
+  if (c.spacing != null && (typeof c.spacing !== 'number' || !(c.spacing >= 0) || c.spacing > 50)) bad('plant.spacing', 'must be a number from 0 (seed or turf) to 50');
+  for (const f of ['container', 'notes', 'model', 'source']) if (f in c) text('plant.' + f, c[f]);
+  if ('symbol' in c && c.symbol !== '' && !PLANT.symbols.includes(c.symbol)) bad('plant.symbol', 'must be empty or one of ' + PLANT.symbols.join(', '));
+}
 
 export function validateItem(obj, { partial = false } = {}) {
   const errors = [];
@@ -323,22 +554,23 @@ export function validateItem(obj, { partial = false } = {}) {
     for (const k of ['x', 'y', 'z']) num(p + '.' + k, b[k]);
     for (const k of ['w', 'd', 'h']) num(p + '.' + k, b[k], { positive: true });
   };
-  if ('body' in obj && obj.body !== null && obj_('body', obj.body)) {
-    const b = obj.body;
-    if (b.type === 'box') box('body', b, false);
+  // a body (the item's, or a variant's): a box or a mesh
+  const bodyCheck = (p, b) => {
+    if (b.type === 'box') box(p, b, false);
     else if (b.type === 'mesh') {
-      keys('body', b, ['type', 'positions', 'indices']);
+      keys(p, b, ['type', 'positions', 'indices']);
       const P = b.positions, I = b.indices;
-      if (!Array.isArray(P) || P.length < 9 || P.length % 3) err('body.positions', msg('libitem.v.positions'));
-      else for (let i = 0; i < P.length; i++) if (!isNum(P[i]) || Math.abs(P[i]) > LIMITS.coord) { err('body.positions', msg('libitem.v.bad_coord_at', { i })); break; }
-      if (!Array.isArray(I) || !I.length || I.length % 3) err('body.indices', msg('libitem.v.triangles'));
+      if (!Array.isArray(P) || P.length < 9 || P.length % 3) err(p + '.positions', msg('libitem.v.positions'));
+      else for (let i = 0; i < P.length; i++) if (!isNum(P[i]) || Math.abs(P[i]) > LIMITS.coord) { err(p + '.positions', msg('libitem.v.bad_coord_at', { i })); break; }
+      if (!Array.isArray(I) || !I.length || I.length % 3) err(p + '.indices', msg('libitem.v.triangles'));
       else {
-        if (I.length / 3 > LIMITS.triangles) err('body.indices', msg('libitem.v.too_many_triangles', { n: LIMITS.triangles }));
+        if (I.length / 3 > LIMITS.triangles) err(p + '.indices', msg('libitem.v.too_many_triangles', { n: LIMITS.triangles }));
         const n = Array.isArray(P) ? P.length / 3 : 0;
-        for (let i = 0; i < I.length; i++) if (!Number.isInteger(I[i]) || I[i] < 0 || I[i] >= n) { err('body.indices', msg('libitem.v.index_range', { i })); break; }
+        for (let i = 0; i < I.length; i++) if (!Number.isInteger(I[i]) || I[i] < 0 || I[i] >= n) { err(p + '.indices', msg('libitem.v.index_range', { i })); break; }
       }
-    } else err('body.type', msg('libitem.v.body_type'));
-  }
+    } else err(p + '.type', msg('libitem.v.body_type'));
+  };
+  if ('body' in obj && obj.body !== null && obj_('body', obj.body)) bodyCheck('body', obj.body);
   if ('clearances' in obj) {
     if (!Array.isArray(obj.clearances)) err('clearances', msg('libitem.v.list'));
     else obj.clearances.forEach((c, i) => { if (obj_('clearances[' + i + ']', c)) { box('clearances[' + i + ']', c, true); str('clearances[' + i + '].name', c.name); } });
@@ -385,6 +617,189 @@ export function validateItem(obj, { partial = false } = {}) {
           str(p + '.params.' + k, v);
         }
       }
+    }
+  }
+  // 0.7 MT.3: a material item — {graph (JSON text of a cc-material graph), maps {role: {file, sha256, media, bytes, convention?}}, size [w, h] m}
+  const isMat = obj.kind === 'material';
+  if ('material' in obj) {
+    if (!isMat) err('material', msg('libitem.v.material_kind'));
+    else if (obj_('material', obj.material)) {
+      const m = obj.material;
+      keys('material', m, ['graph', 'maps', 'size']);
+      const g = m.graph;
+      if (typeof g !== 'string' || !g || new TextEncoder().encode(g).length > 524288) err('material.graph', msg('libitem.v.material_graph'));
+      else {
+        let j = null;
+        try { j = JSON.parse(g); } catch (e) { j = null; }
+        if (!j || typeof j !== 'object' || j.format !== 'cc-material' || !Array.isArray(j.nodes)) err('material.graph', msg('libitem.v.material_graph_bad'));
+        else if (j.nodes.length > 256 || (Array.isArray(j.links) ? j.links.length : 0) > 1024) err('material.graph', msg('libitem.v.material_graph_big'));
+      }
+      if (!('maps' in m)) err('material.maps', msg('libitem.v.required'));
+      else if (obj_('material.maps', m.maps)) {
+        if (Object.keys(m.maps).length > MATERIAL_MAPS.length) err('material.maps', msg('libitem.v.material_maps_many'));
+        for (const [role, f] of Object.entries(m.maps)) {
+          const p = 'material.maps.' + role.slice(0, 20);
+          if (!MATERIAL_MAPS.includes(role)) { err(p, msg('libitem.v.material_map_name')); continue; }
+          if (!obj_(p, f)) continue;
+          keys(p, f, ['file', 'sha256', 'media', 'bytes', 'convention']);
+          str(p + '.file', f.file, { required: true });
+          if (typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(f.sha256)) err(p + '.sha256', msg('libitem.v.sha256'));
+          if (!MATERIAL_MEDIA.includes(f.media)) err(p + '.media', msg('libitem.v.media'));
+          num(p + '.bytes', f.bytes, { min: 1, max: 33554432, int: true });
+          if ('convention' in f && f.convention !== 'opengl' && f.convention !== 'directx') err(p + '.convention', msg('libitem.v.convention'));
+        }
+      }
+      if (!Array.isArray(m.size) || m.size.length !== 2) err('material.size', msg('libitem.v.material_size'));
+      else m.size.forEach((x, i) => num('material.size[' + i + ']', x, { min: 0.001, max: 1000 }));
+    }
+  } else if (isMat) err('material', msg('libitem.v.required'));
+  if (isMat) {
+    if ('body' in obj && obj.body !== null) err('body', msg('libitem.v.material_body'));
+    if (obj.plan && Array.isArray(obj.plan.entities) && obj.plan.entities.length) err('plan', msg('libitem.v.material_plan'));
+  }
+  // 0.8 REG.1a: a regulation item carries a building regulation pack. Only its shape is checked here (this file imports nothing); the
+  // Building regulations add-on checks every rule (regs.js cleanPack) and the server stores exactly what that makes of it
+  // (LibraryRegulations::clean).
+  const isReg = obj.kind === 'regulation';
+  if ('regulation' in obj) {
+    const g = obj.regulation;
+    if (!isReg) err('regulation', msg('libitem.v.regulation_kind'));
+    else if (!g || typeof g !== 'object' || Array.isArray(g) || g.format !== 'cadcraft-regulation-pack' || g.version !== 1
+      || typeof g.id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,47}$/.test(g.id) || !Array.isArray(g.rules) || g.rules.length > 200) err('regulation', msg('libitem.v.regulation_pack'));
+    else if (new TextEncoder().encode(JSON.stringify(g)).length > 262144) err('regulation', msg('libitem.v.regulation_big'));
+  } else if (isReg) err('regulation', msg('libitem.v.required'));
+  // 0.8 IND.7: a component item carries a component record (checkComponent; LibraryItemFormat::component is the server's twin)
+  const isComp = obj.kind === 'component';
+  if ('component' in obj) {
+    if (!isComp) err('component', msg('libitem.v.component_kind'));
+    else if (!obj.component || typeof obj.component !== 'object' || Array.isArray(obj.component)) err('component', msg('libitem.v.object'));
+    else checkComponent(obj.component, err);
+  } else if (isComp) err('component', msg('libitem.v.component_required'));
+  if (isComp) {
+    if ('body' in obj && obj.body !== null) err('body', msg('libitem.v.component_body'));
+    if (obj.plan && Array.isArray(obj.plan.entities) && obj.plan.entities.length) err('plan', msg('libitem.v.component_plan'));
+    if ('ports' in obj || 'variants' in obj) err('item', msg('libitem.v.component_extra'));
+  }
+  // 0.8 LD.1: a plant item carries a plant record (checkPlant; LibraryItemFormat::plant is the server's twin)
+  const isPlant = obj.kind === 'plant';
+  if ('plant' in obj) {
+    if (!isPlant) err('plant', msg('libitem.v.plant_kind'));
+    else if (!obj.plant || typeof obj.plant !== 'object' || Array.isArray(obj.plant)) err('plant', msg('libitem.v.object'));
+    else checkPlant(obj.plant, err);
+  } else if (isPlant) err('plant', msg('libitem.v.plant_required'));
+  if (isPlant) {
+    if ('body' in obj && obj.body !== null) err('body', msg('libitem.v.plant_body'));
+    if (obj.plan && Array.isArray(obj.plan.entities) && obj.plan.entities.length) err('plan', msg('libitem.v.plant_plan'));
+    if ('ports' in obj || 'variants' in obj) err('item', msg('libitem.v.plant_extra'));
+  }
+  // 0.8 SU.889: a template item carries a document template (checkTemplate; LibraryItemFormat::template is the server's twin)
+  const isTpl = obj.kind === 'template';
+  if ('template' in obj) {
+    if (!isTpl) err('template', msg('libitem.v.template_kind'));
+    else if (!obj.template || typeof obj.template !== 'object' || Array.isArray(obj.template)) err('template', msg('libitem.v.object'));
+    else checkTemplate(obj.template, err);
+  } else if (isTpl) err('template', msg('libitem.v.template_required'));
+  if (isTpl) {
+    if ('body' in obj && obj.body !== null) err('body', msg('libitem.v.template_body'));
+    if (obj.plan && Array.isArray(obj.plan.entities) && obj.plan.entities.length) err('plan', msg('libitem.v.template_plan'));
+    if ('ports' in obj || 'variants' in obj) err('item', msg('libitem.v.template_extra'));
+  }
+  if (isReg) {
+    if ('body' in obj && obj.body !== null) err('body', msg('libitem.v.regulation_body'));
+    if (obj.plan && Array.isArray(obj.plan.entities) && obj.plan.entities.length) err('plan', msg('libitem.v.regulation_plan'));
+    if ('ports' in obj || 'variants' in obj) err('item', msg('libitem.v.regulation_extra'));
+  }
+  // 0.7 W3.19: ports — where pipes, ducts and cables meet the item: [{ name, system, direction, shape, size, h?, x, y, z, axis? }]
+  // (mm, item coordinates; size = diameter of a round port, width of a rect or oval one, h = its height; nominal = the pipe's
+  // nominal size as its table writes it, "2" for NPS 2, "DN50"; axis = the way the port faces, out of the item; absent = the
+  // nearest face of the body's box). Names are unique within one list.
+  const portsCheck = (p, list) => {
+    if (!Array.isArray(list)) return err(p, msg('libitem.v.list'));
+    if (list.length > VARIANT_LIMITS.ports) err(p, msg('libitem.v.too_many_items', { n: VARIANT_LIMITS.ports }));
+    const seen = new Set();
+    list.slice(0, VARIANT_LIMITS.ports).forEach((o, i) => {
+      const q = p + '[' + i + ']';
+      if (!obj_(q, o)) return;
+      keys(q, o, ['name', 'system', 'direction', 'shape', 'size', 'h', 'nominal', 'x', 'y', 'z', 'axis']);
+      for (const k of ['name', 'system', 'direction', 'shape', 'size']) if (!(k in o)) err(q + '.' + k, msg('libitem.v.required'));
+      if ('name' in o) {
+        str(q + '.name', o.name, { required: true });
+        if (typeof o.name === 'string' && seen.has(o.name)) err(q + '.name', msg('libitem.v.duplicate'));
+        seen.add(o.name);
+      }
+      if ('nominal' in o && (typeof o.nominal !== 'string' || !o.nominal.trim() || o.nominal.length > 20)) err(q + '.nominal', msg('libitem.v.port_nominal'));
+      if ('system' in o && !PORT_SYSTEMS.includes(o.system)) err(q + '.system', msg('libitem.v.port_system', { list: PORT_SYSTEMS.join(', ') }));
+      if ('direction' in o && !PORT_DIRECTIONS.includes(o.direction)) err(q + '.direction', msg('libitem.v.port_direction'));
+      if ('shape' in o && !PORT_SHAPES.includes(o.shape)) err(q + '.shape', msg('libitem.v.port_shape'));
+      if ('size' in o) num(q + '.size', o.size, { positive: true });
+      if ('h' in o) num(q + '.h', o.h, { positive: true });
+      else if (o.shape === 'rect' || o.shape === 'oval') err(q + '.h', msg('libitem.v.required'));
+      for (const k of ['x', 'y', 'z']) { if (!(k in o)) err(q + '.' + k, msg('libitem.v.required')); else num(q + '.' + k, o[k]); }
+      if ('axis' in o) {
+        const a = o.axis;
+        if (!Array.isArray(a) || a.length !== 3 || !a.every((c) => isNum(c) && Math.abs(c) <= LIMITS.coord) || !(a[0] * a[0] + a[1] * a[1] + a[2] * a[2] > 0)) err(q + '.axis', msg('libitem.v.port_axis'));
+      }
+    });
+  };
+  if ('ports' in obj) portsCheck('ports', obj.ports);
+  // 0.7 W3.19: variants — one item in several sizes or options. columns = the parameter table's columns; rows = one per
+  // variant: its values (every column), and optionally its own body, footprint and ports (absent = the item's). The item's own
+  // plan / body / ports are what a reader that knows no variants sees; they should be the default variant's.
+  if ('variants' in obj) {
+    if (isMat) err('variants', msg('libitem.v.variants_material'));
+    else if (obj_('variants', obj.variants)) {
+      const v = obj.variants;
+      keys('variants', v, ['columns', 'rows', 'default']);
+      const cols = [];
+      if (!('columns' in v)) err('variants.columns', msg('libitem.v.required'));
+      else if (!Array.isArray(v.columns) || !v.columns.length) err('variants.columns', Array.isArray(v.columns) ? msg('libitem.v.variant_columns') : msg('libitem.v.list'));
+      else {
+        if (v.columns.length > VARIANT_LIMITS.columns) err('variants.columns', msg('libitem.v.too_many_items', { n: VARIANT_LIMITS.columns }));
+        v.columns.slice(0, VARIANT_LIMITS.columns).forEach((c, i) => {
+          const p = 'variants.columns[' + i + ']';
+          if (!obj_(p, c)) return;
+          keys(p, c, ['key', 'label', 'unit']);
+          if (!('key' in c)) err(p + '.key', msg('libitem.v.required'));
+          else if (typeof c.key !== 'string' || !LABEL_KEY_RE.test(c.key)) err(p + '.key', msg('libitem.v.label_key'));
+          else if (cols.includes(c.key)) err(p + '.key', msg('libitem.v.duplicate'));
+          else cols.push(c.key);
+          for (const k of ['label', 'unit']) if (k in c) str(p + '.' + k, c[k]);
+        });
+      }
+      const ids = [];
+      if (!('rows' in v)) err('variants.rows', msg('libitem.v.required'));
+      else if (!Array.isArray(v.rows) || !v.rows.length) err('variants.rows', Array.isArray(v.rows) ? msg('libitem.v.variant_rows') : msg('libitem.v.list'));
+      else {
+        if (v.rows.length > VARIANT_LIMITS.rows) err('variants.rows', msg('libitem.v.too_many_items', { n: VARIANT_LIMITS.rows }));
+        v.rows.slice(0, VARIANT_LIMITS.rows).forEach((r, i) => {
+          const p = 'variants.rows[' + i + ']';
+          if (!obj_(p, r)) return;
+          keys(p, r, ['id', 'name', 'values', 'body', 'footprint', 'ports']);
+          if (!('id' in r)) err(p + '.id', msg('libitem.v.required'));
+          else if (typeof r.id !== 'string' || !VARIANT_ID_RE.test(r.id)) err(p + '.id', msg('libitem.v.variant_id'));
+          else if (ids.includes(r.id)) err(p + '.id', msg('libitem.v.duplicate'));
+          else ids.push(r.id);
+          if (!('name' in r)) err(p + '.name', msg('libitem.v.required')); else str(p + '.name', r.name, { required: true });
+          if (!('values' in r)) err(p + '.values', msg('libitem.v.required'));
+          else if (obj_(p + '.values', r.values)) {
+            for (const [k, x] of Object.entries(r.values)) {
+              if (!cols.includes(k)) { err(p + '.values', msg('libitem.v.variant_cell_extra', { key: k.slice(0, 40) })); continue; }
+              if (typeof x === 'string') str(p + '.values.' + k, x);
+              else if (!isNum(x) || Math.abs(x) > LIMITS.coord) err(p + '.values.' + k, msg('libitem.v.variant_value'));
+            }
+            for (const k of cols) if (!(k in r.values)) err(p + '.values', msg('libitem.v.variant_cell_missing', { key: k.slice(0, 40) }));
+          }
+          if ('body' in r && r.body !== null && obj_(p + '.body', r.body)) bodyCheck(p + '.body', r.body);
+          if ('footprint' in r && obj_(p + '.footprint', r.footprint)) {
+            const f = r.footprint;
+            keys(p + '.footprint', f, ['x', 'y', 'w', 'd']);
+            for (const k of ['x', 'y']) { if (!(k in f)) err(p + '.footprint.' + k, msg('libitem.v.required')); else num(p + '.footprint.' + k, f[k]); }
+            for (const k of ['w', 'd']) { if (!(k in f)) err(p + '.footprint.' + k, msg('libitem.v.required')); else num(p + '.footprint.' + k, f[k], { positive: true }); }
+          }
+          if ('ports' in r) portsCheck(p + '.ports', r.ports);
+        });
+      }
+      if ('default' in v && (typeof v.default !== 'string' || !ids.includes(v.default))) err('variants.default', msg('libitem.v.variant_default'));
     }
   }
   if ('provenance' in obj && obj_('provenance', obj.provenance)) {
@@ -528,6 +943,63 @@ export function boxFromPlan(plan, h, z = 0) {
   const w = b.maxX - b.minX, d = b.maxY - b.minY;
   if (!(w > 0) || !(d > 0)) return null;
   return { type: 'box', x: r4(b.minX), y: r4(b.minY), z: r4(z), w: r4(w), d: r4(d), h: r4(h) };
+}
+
+// ---------------------------------------------------------------------------
+// Variants and ports (0.7 W3.19)
+
+/** The item's variants: [{ id, name, values, default }] (default: exactly one — `variants.default`, else the first); [] for an item without. */
+export function variantList(item) {
+  const v = item && item.variants;
+  if (!v || !Array.isArray(v.rows) || !v.rows.length) return [];
+  const def = v.rows.some((r) => r.id === v.default) ? v.default : v.rows[0].id;
+  return v.rows.map((r) => ({ id: r.id, name: r.name, values: r.values || {}, default: r.id === def }));
+}
+
+/** One variant's row of the item (id absent or unknown → the default variant); null for an item without variants. */
+export function variantOf(item, id = null) {
+  const list = variantList(item);
+  if (!list.length) return null;
+  const pick = list.find((x) => x.id === id) || list.find((x) => x.default);
+  return item.variants.rows.find((r) => r.id === pick.id);
+}
+
+/** The ports of the item, or of its variant when that variant lists its own. */
+export function portsOf(item, id = null) {
+  const row = id === null ? null : variantOf(item, id);
+  if (row && Array.isArray(row.ports)) return row.ports;
+  return Array.isArray(item?.ports) ? item.ports : [];
+}
+
+/** The item as one of its variants: a plain item (no `variants`) with that variant's body, ports and — when it gives a
+ * footprint — a plan that is that rectangle (layer "0"); everything else is the item's. params width / depth / height follow
+ * the variant's box when it has one. With { named: true } its name is "<item> — <variant>" (what a model shows). An item
+ * without variants comes back as it is. */
+export function itemAsVariant(item, id = null, { named = false } = {}) {
+  const row = variantOf(item, id);
+  if (!row) return item;
+  const { variants, ...out } = item;
+  if (named) out.name = (item.name + ' — ' + row.name).slice(0, LIMITS.text);   // placed in a model: "Mounting plate — Large" is its name
+  if ('body' in row) out.body = row.body;
+  if (Array.isArray(row.ports)) out.ports = row.ports;
+  if (row.footprint) {
+    const f = row.footprint;
+    const layers = (out.plan?.layers || []).some((l) => l.name === '0') ? out.plan.layers : [{ name: '0' }, ...(out.plan?.layers || [])];
+    out.plan = { layers, entities: [{ type: 'poly', layer: '0', color: null, closed: true, pts: [[f.x, f.y], [f.x + f.w, f.y], [f.x + f.w, f.y + f.d], [f.x, f.y + f.d]] }] };
+  }
+  const b = bodyBox(out.body), fp = row.footprint || null;
+  if (b || fp) out.params = { ...(out.params || {}), width: fp ? fp.w : b.w, depth: fp ? fp.d : b.d, ...(b ? { height: b.h } : {}) };
+  return out;
+}
+
+/** The box a body fills: a box body itself, a mesh body's extent; null for no body. */
+export function bodyBox(body) {
+  if (!body) return null;
+  if (body.type === 'box') return { x: body.x, y: body.y, z: body.z, w: body.w, d: body.d, h: body.h };
+  if (body.type !== 'mesh' || !Array.isArray(body.positions) || body.positions.length < 3) return null;
+  const P = body.positions, lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < P.length; i += 3) for (let k = 0; k < 3; k++) { if (P[i + k] < lo[k]) lo[k] = P[i + k]; if (P[i + k] > hi[k]) hi[k] = P[i + k]; }
+  return { x: r4(lo[0]), y: r4(lo[1]), z: r4(lo[2]), w: r4(hi[0] - lo[0]), d: r4(hi[1] - lo[1]), h: r4(hi[2] - lo[2]) };
 }
 
 /** Convex hull (monotone chain) of [[x,y]…] → CCW points. */

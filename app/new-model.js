@@ -81,7 +81,7 @@ export function newBuilding({ name, siteName, levels, author = '', fileName = 'b
   const org = add(`IFCORGANIZATION($,${S('CadCraft')},$,$,$)`);   // i18n-ignore: the maker named in the file
   const po = add(`IFCPERSONANDORGANIZATION(${person},${org},$)`);
   const appl = add(`IFCAPPLICATION(${org},${S(version || 'dev')},${S('BimCraft')},${S('BimCraft')})`);   // i18n-ignore: product names in the file
-  const oh = add(`IFCOWNERHISTORY(${po},${appl},$,.ADDED.,$,$,$,${ts})`);
+  const oh = add(`IFCOWNERHISTORY(${po},${appl},$,.ADDED.,${ts},$,$,${ts})`);
 
   const units = [
     add('IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)'),

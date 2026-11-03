@@ -32,9 +32,17 @@ export const GAP_MM = 100;   // paste in place beside the original: this much cl
 const MAX = { name: 255, file: 255, number: 40, notes: 200, key: 120, model: 64, cls: 64, guid: 64, library: 40, ids: 50000 };
 const cut = (s, n) => String(s ?? '').slice(0, n);
 
-/** The library key a placement's type is found by (ifc-place.js typeFor): "uuid@version" or "sha:<sha256>". */
+/** The library key a placement's type is found by (ifc-place.js typeFor): "uuid@version[#variant]" or "sha:<sha256>". */
+/** A placement's variant as the clip keeps it ({ id, name, values } with plain values), or null when it is not one. */
+function variantMeta(v) {
+  if (!v || typeof v !== 'object' || typeof v.id !== 'string' || !/^[A-Za-z0-9_.-]{1,60}$/.test(v.id)) return null;
+  const values = {};
+  for (const [k, x] of Object.entries(v.values && typeof v.values === 'object' ? v.values : {}).slice(0, 24)) if (typeof x === 'number' || typeof x === 'string') values[String(k).slice(0, 80)] = typeof x === 'string' ? x.slice(0, 200) : x;
+  return { id: v.id, name: String(v.name ?? v.id).slice(0, 200), values };
+}
+
 export function libKey(p) {
-  return p.uuid ? p.uuid + '@' + p.version : 'sha:' + (p.sha256 || '');
+  return p.uuid ? p.uuid + '@' + p.version + (p.variant ? '#' + p.variant : '') : 'sha:' + (p.sha256 || '');   // 0.7 W3.19: "#variant" for an item with variants
 }
 
 /**
@@ -53,7 +61,7 @@ export function placementClip(p, ctx = {}) {
     x: p.x, y: p.y, rot: p.rot,
     box: ctx.box || null,
     item: ctx.item || null,
-    meta: ctx.meta ? { library: cut(ctx.meta.library, MAX.library), sha256: cut(ctx.meta.sha256, 64), sourceFile: cut(ctx.meta.sourceFile, MAX.file) } : null,
+    meta: ctx.meta ? { library: cut(ctx.meta.library, MAX.library), sha256: cut(ctx.meta.sha256, 64), sourceFile: cut(ctx.meta.sourceFile, MAX.file), ...(ctx.meta.variant ? { variant: variantMeta(ctx.meta.variant) } : {}) } : null,
   };
 }
 
@@ -147,7 +155,7 @@ export function validateClip(obj) {
     if (typeof obj.cut !== 'boolean') bad('cut'); else out.cut = obj.cut;
     place();
   } else if (obj.kind === 'placement') {
-    out.key = str('key', MAX.key, /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@\d{1,9}|sha:[0-9a-f]{0,64})$/i);
+    out.key = str('key', MAX.key, /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@\d{1,9}(#[A-Za-z0-9_.-]{1,60})?|sha:[0-9a-f]{0,64})$/i);
     out.itemNumber = str('itemNumber', MAX.number);
     if (!Number.isInteger(obj.quantity) || obj.quantity < 1 || obj.quantity > 1e6) bad('quantity'); else out.quantity = obj.quantity;
     out.notes = str('notes', MAX.notes);
@@ -156,13 +164,15 @@ export function validateClip(obj) {
     if (obj.meta !== null && obj.meta !== undefined) {
       const m = obj.meta;
       if (m && typeof m === 'object' && typeof m.library === 'string' && m.library.length <= MAX.library && typeof m.sha256 === 'string' && /^([0-9a-f]{64})?$/.test(m.sha256)
-        && typeof m.sourceFile === 'string' && m.sourceFile.length <= MAX.file) out.meta = { library: m.library, sha256: m.sha256, sourceFile: m.sourceFile };
-      else bad('meta');
+        && typeof m.sourceFile === 'string' && m.sourceFile.length <= MAX.file) {
+        out.meta = { library: m.library, sha256: m.sha256, sourceFile: m.sourceFile };
+        if (m.variant !== undefined) { const v = variantMeta(m.variant); if (v) out.meta.variant = v; else bad('meta'); }
+      } else bad('meta');
     }
     out.item = null;
     if (obj.item !== null && obj.item !== undefined) {
       const full = validateItem(obj.item), part = full.ok ? full : validateItem(obj.item, { partial: true });
-      const itemKey = obj.item && obj.item.uuid ? obj.item.uuid + '@' + obj.item.version : 'sha:' + (out.meta?.sha256 || '');
+      const itemKey = obj.item && obj.item.uuid ? obj.item.uuid + '@' + obj.item.version + (out.meta?.variant?.id ? '#' + out.meta.variant.id : '') : 'sha:' + (out.meta?.sha256 || '');
       if (!part.ok) notes.push(t('clip.note.item_invalid', { error: part.errors[0] }));
       else if (itemKey !== out.key) notes.push(t('clip.note.item_other'));
       else out.item = obj.item;

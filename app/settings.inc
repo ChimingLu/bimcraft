@@ -11,7 +11,9 @@
  *   bcCorner  the corner indicator in the 3D views: view cube / axis icon / none   default view cube
  *   bcBoxMargin  room left round the pick by "Section box round the pick", in mm (0.5 WL.2)   default 300
  *   bcGeoCrs  the system Measure › Location gives latitude and longitude in (0.5 WL.4): WGS 84, the file's own datum, or
- *             one of a few common geographic systems (EPSG codes)                         default WGS 84
+ *             one of a few common geographic systems (EPSG codes); 0.8 D8.9: "Choose another system…" adds any EPSG system,
+ *             UTM zone or one of the person's own as one more option                         default WGS 84
+ *   bcIdsEmbed  Check against IDS: also keep the IDS text inside the IFC (0.7.1 71.25; off: only a reference, the text stays in this browser)
  *   bcAuthor  your name on BCF issues (localStorage bimcraft.author; 0.5 SI.9): signed in, [data-bc-author-account] says
  *             "From your account (<name>)" with "Use another name"; a typed name wins until cleared; not reset
  *   bcAssist, bcAssistRead, bcAssistEdit   AI assistants and scripts (0.4 X.7, AGENTS-SPEC §7): on/off, then which groups
@@ -31,6 +33,19 @@
     <label><input type="radio" name="bcEdges" value="off"> <i class="bi bi-square" aria-hidden="true"></i> <?= Lang::e('set.edges.off') ?></label>
   </div>
   <p class="shell-hint-text"><?= Lang::e('set.edges.hint') ?></p>
+</fieldset>
+<fieldset class="shell-set" data-bc-ids-settings>
+  <legend><?= Lang::e('ids.set.legend') ?></legend>
+  <label class="shell-check"><input type="checkbox" name="bcIdsEmbed"> <?= Lang::e('ids.set.embed') ?></label>
+  <p class="shell-hint-text"><?= Lang::e('ids.set.embed.hint') ?></p>
+</fieldset>
+<fieldset class="shell-set">
+  <legend><?= Lang::e('set.dwgstart') ?></legend>
+  <div class="shell-seg" role="radiogroup" aria-label="<?= Lang::e('set.dwgstart') ?>">
+    <label><input type="radio" name="bcDwgStart" value="3d"> <i class="bi bi-badge-3d" aria-hidden="true"></i> <?= Lang::e('set.dwgstart.3d') ?></label>
+    <label><input type="radio" name="bcDwgStart" value="2d"> <i class="bi bi-bounding-box-circles" aria-hidden="true"></i> <?= Lang::e('set.dwgstart.2d') ?></label>
+  </div>
+  <p class="shell-hint-text"><?= Lang::e('set.dwgstart.hint') ?></p>
 </fieldset>
 <fieldset class="shell-set">
   <legend><?= Lang::e('set.view') ?></legend>
@@ -87,6 +102,7 @@
       <option value="4490">CGCS2000 (EPSG:4490)</option>
       <?php /* i18n-ignore-end */ ?>
     </select>
+    <button type="button" class="btn-line btn-sm-cc" data-bc-geo-more><?= Lang::e('set.geo.more') ?></button>
   </div>
   <p class="shell-hint-text"><?= Lang::e('set.geo.hint') ?></p>
 </fieldset>
@@ -110,8 +126,17 @@
   <label class="shell-check bc-set-sub"><input type="checkbox" name="bcAssistRead"> <?= Lang::e('set.assist.read') ?></label>
   <label class="shell-check bc-set-sub"><input type="checkbox" name="bcAssistEdit"> <?= Lang::e('set.assist.edit') ?></label>
   <label class="shell-check bc-set-sub"><input type="checkbox" name="bcAssistSave"> <?= Lang::e('set.assist.save') ?></label>
+  <label class="shell-check bc-set-sub"><input type="checkbox" name="bcAssistExport"> <?= Lang::e('set.assist.export') ?></label>
   <details class="bc-assist-log" data-bc-assist-log>
     <summary><?= Lang::e('set.assist.activity') ?></summary>
     <ol></ol>
   </details>
+</fieldset>
+<?php /* 0.7 CU.1 (session compute): what this machine can render with; compute-bim.js fills it from compute/probe.js */ ?>
+<fieldset class="shell-set" data-compute-set>
+  <legend><?= Lang::e('compute.set.title') ?></legend>
+  <p class="shell-hint-text"><strong><?= Lang::e('compute.card.title') ?></strong><br><?= Lang::e('compute.card.lede') ?></p>
+  <div data-compute-card><p class="shell-hint-text"><?= Lang::e('compute.card.wait') ?></p></div>
+  <?php /* 0.7 CU.7: other computers on the network — filled only inside CadCraft Studio, which can find them (lan-ui.js) */ ?>
+  <div data-compute-lan hidden></div>
 </fieldset>

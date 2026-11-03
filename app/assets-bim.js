@@ -4,7 +4,8 @@
  * docs/spikes/LC.12_PART_2.md): the assets, their data and a maintenance record, all kept in the IFC with IFC's own sets and
  * entities so any program that reads IFC sees them. No DOM: node bin/test-bimcraft.mjs --extra2 --only assets.
  *
- *   readAssets(W, api, mid, { today }) → [{ id, guid, cls, name, tag, storey, tracked, data, log, last, nextDue, due }]
+ *   readAssets(W, api, mid, { today }) → [{ id, guid, cls, name, tag, storey, tracked, data, log, last, nextDue, due, docs,
+ *       limits: { low, high, unit } (the CadCraft_Sensor set, assets-bim-sensors.js) }]
  *       the assets: equipment and fixtures (ASSET_CLASSES, IfcBuildingElementProxy only with CadCraft_Equipment) and any
  *       element carrying asset data, a maintenance entry or our CadCraft_Asset mark. data = { maker, model, ref, serial,
  *       barcode, installed, warrantyId, warrantyStart, warrantyEnd, life (years) } (strings, '' = none); log = entries,
@@ -14,8 +15,19 @@
  *   assetDataOp(guid, patch)                            patch keys as `data`; '' clears that value (the property is removed)
  *   addEntryOp(guid, entry) / editEntryOp(taskGuid, entry) / removeEntryOp(taskGuid)
  *   Each op is `(ed) => { journal, … }` for IfcEditor.modelChange: one undo step; ops name things by GlobalId (redo safe).
- *   assetsCsv(assets) → text   one row per asset (its data, last, next due) + one per maintenance entry; formula cells escaped
+ *   addDocOp(guid, { title, location, kind }) / removeDocOp(guid, relGuid)     documents per asset (0.7 LC.12 item 1, bim-ops)
+ *   assetsCsv(assets) → text   one row per asset (its data, last, next due) + one per maintenance entry + one per document;
+ *                              formula cells escaped
  *   isDay(s) → bool             a real calendar day 'YYYY-MM-DD'
+ *   docLocation(s) → '' | error key   a document's place: a web address (http / https) or a file name or path beside the
+ *                              IFC; any other scheme (javascript:, data:, file:…) refused. openable(s) → only http(s) opens.
+ *
+ * Documents (0.7, session bim-ops): an asset's `docs` = [{ rel, title, location, kind, ours, fromType }] — manuals,
+ * warranties, photos, certificates, drawings, linked by a name or a web address; the files themselves stay where they are
+ * (nothing is uploaded or copied in). Each is an IfcDocumentReference (IFC4: Location IfcURIReference, Name, Description =
+ * the kind; IFC2X3: Location IfcLabel, Name) tied to the element by its own IfcRelAssociatesDocument named DOC_REL with the
+ * kind as its Description (both schemas). Other programs' references (and IfcDocumentInformation) are read too, kind
+ * 'other' unless they carry one of ours; references on the element's type are listed with fromType (removed on the type).
  *
  * How it is kept (IFC4 / IFC2X3 schemas):
  *   Pset_ManufacturerTypeInformation  Manufacturer, ModelLabel, ModelReference (IfcLabel)
@@ -28,7 +40,8 @@
  *   IFC2X3's standard sets want IfcCalendarDate entities for dates; a label 'YYYY-MM-DD' is written there instead (said in help).
  */
 import { ModelWriter } from './model-write.js';
-import { ids, val } from './ifc-util.js';
+import { ids, val, deleteLine } from './ifc-util.js';
+import { SENSOR_SET, readSensorSet } from './assets-bim-sensors.js';
 
 export const ASSET_CLASSES = ['IFCFURNITURE', 'IFCFURNISHINGELEMENT', 'IFCSANITARYTERMINAL', 'IFCLIGHTFIXTURE', 'IFCELECTRICAPPLIANCE', 'IFCAIRTERMINAL',
   'IFCFLOWTERMINAL', 'IFCVALVE', 'IFCFLOWCONTROLLER', 'IFCPUMP', 'IFCFAN', 'IFCFLOWMOVINGDEVICE', 'IFCBOILER', 'IFCCHILLER', 'IFCUNITARYEQUIPMENT',
@@ -36,6 +49,8 @@ export const ASSET_CLASSES = ['IFCFURNITURE', 'IFCFURNISHINGELEMENT', 'IFCSANITA
   'IFCELECTRICDISTRIBUTIONBOARD', 'IFCTRANSPORTELEMENT'];
 export const SOON_DAYS = 30;
 export const MARK = 'CadCraft_Asset', LOG_SET = 'CadCraft_Maintenance';
+export const DOC_REL = 'CadCraft_AssetDocument';
+export const DOC_KINDS = ['manual', 'warranty', 'photo', 'certificate', 'drawing', 'other'];
 export const FIELDS = ['maker', 'model', 'ref', 'serial', 'barcode', 'installed', 'warrantyId', 'warrantyStart', 'warrantyEnd', 'life'];
 const DATE_FIELDS = new Set(['installed', 'warrantyStart', 'warrantyEnd']);
 /** field → [set, property, IFC4 type, IFC2X3 type] */
@@ -127,6 +142,19 @@ export function readAssets(W, api, mid, { today = new Date().toISOString().slice
       next: day(own.NextDue) || day(val(tt?.ScheduleStart)), notes: String(val(task.Description) ?? '') };
     for (const h of r.RelatedObjects || []) { if (!logs.has(h.value)) logs.set(h.value, []); logs.get(h.value).push(entry); }
   }
+  // documents by element (and by type: an element shows its type's too)
+  const docs = new Map(), typeOf = new Map();
+  for (const rid of tryIds(api, mid, 'IFCRELDEFINESBYTYPE')) { const r = api.GetLine(mid, rid, false); for (const h of r?.RelatedObjects || []) typeOf.set(h.value, r.RelatingType?.value); }
+  for (const rid of tryIds(api, mid, 'IFCRELASSOCIATESDOCUMENT')) {
+    const r = api.GetLine(mid, rid, false), dref = r?.RelatingDocument?.value;
+    const d = dref ? api.GetLine(mid, dref, false) : null;
+    if (!d) continue;
+    const ours = val(r.Name) === DOC_REL;
+    const k0 = String((ours ? val(r.Description) : val(d.Description)) ?? '').toLowerCase();
+    const entry = { rel: val(r.GlobalId), title: String(val(d.Name) ?? ''), location: String(val(d.Location) ?? ''), kind: DOC_KINDS.includes(k0) ? k0 : 'other', ours };
+    for (const h of r.RelatedObjects || []) { if (!docs.has(h.value)) docs.set(h.value, []); docs.get(h.value).push(entry); }
+  }
+  const docsOf = (id) => [...(docs.get(id) || []).map((x) => ({ ...x, fromType: false })), ...(docs.get(typeOf.get(id)) || []).map((x) => ({ ...x, fromType: true }))];
   // where each element is: its spatial container, climbed through aggregation (a space → its storey)
   const inside = new Map(), parent = new Map();
   for (const rid of tryIds(api, mid, 'IFCRELCONTAINEDINSPATIALSTRUCTURE')) { const r = api.GetLine(mid, rid, false); for (const h of r?.RelatedElements || []) inside.set(h.value, r.RelatingStructure?.value); }
@@ -136,8 +164,9 @@ export function readAssets(W, api, mid, { today = new Date().toISOString().slice
   const cand = new Map();
   for (const cls of ASSET_CLASSES) for (const id of tryIds(api, mid, cls)) cand.set(id, cls);
   for (const id of tryIds(api, mid, 'IFCBUILDINGELEMENTPROXY')) if (setOf(id, 'CadCraft_Equipment')) cand.set(id, 'IFCBUILDINGELEMENTPROXY');
-  for (const [id, list] of sets) if (!cand.has(id) && list.some((s) => s.name === MARK || Object.values(MAP).some((m) => m[0] === s.name))) cand.set(id, null);
+  for (const [id, list] of sets) if (!cand.has(id) && list.some((s) => s.name === MARK || s.name === SENSOR_SET || Object.values(MAP).some((m) => m[0] === s.name))) cand.set(id, null);
   for (const id of logs.keys()) if (!cand.has(id)) cand.set(id, null);
+  for (const [id, list] of docs) if (!cand.has(id) && list.some((x) => x.ours) && !/TYPE$/.test(String(api.GetLine(mid, id, false)?.constructor?.name || '').toUpperCase())) cand.set(id, null);
   const out = [];
   for (const [id, cls0] of cand) {
     const e = api.GetLine(mid, id, false);
@@ -154,7 +183,7 @@ export function readAssets(W, api, mid, { today = new Date().toISOString().slice
     if (nextDue && isDay(today)) { const d = dayNum(nextDue) - dayNum(today); due = d < 0 ? 'overdue' : d <= SOON_DAYS ? 'soon' : ''; }
     const storey = storeyOf(id);
     out.push({ id, guid: val(e.GlobalId), cls, name: String(val(e.Name) ?? '') || String(val(e.ObjectType) ?? ''), tag: String(val(e.Tag) ?? ''), storey,
-      tracked: !!setOf(id, MARK), data, log, last, nextDue, due });
+      tracked: !!setOf(id, MARK), data, log, last, nextDue, due, docs: docsOf(id), limits: readSensorSet(setOf(id, SENSOR_SET)) });
   }
   return out.sort((a, b) => (a.due === 'overdue' ? 0 : a.due === 'soon' ? 1 : 2) - (b.due === 'overdue' ? 0 : b.due === 'soon' ? 1 : 2) || a.name.localeCompare(b.name) || a.id - b.id);
 }
@@ -224,22 +253,52 @@ export function untrackOp(guid) {
   return (ed) => { const w = new ModelWriter(ed.W, ed.api, ed.mid); return w.run(() => { const id = elementOf(w, guid); dropProps(w, id, MARK, ['Tracked']); return { id }; }); };
 }
 
-export function assetDataOp(guid, patch) {
+/** Write cleaned data on element id with writer w (the body of assetDataOp and importOp). */
+function writeData(w, id, data) {
+  const bySet = new Map(), clear = new Map();
+  for (const [f, v] of Object.entries(data)) {
+    const [set, prop] = MAP[f];
+    if (v) { if (!bySet.has(set)) bySet.set(set, []); bySet.get(set).push([prop, ...typed(w, f, v)]); }
+    else { if (!clear.has(set)) clear.set(set, []); clear.get(set).push(prop); }
+  }
+  for (const [set, rows] of bySet) { ownSet(w, id, set); w.upsertPset(id, set, rows); }
+  for (const [set, props] of clear) dropProps(w, id, set, props);
+}
+function checkData(patch) {
   const data = cleanData(patch);
   if (data.warrantyStart && data.warrantyEnd && data.warrantyEnd < data.warrantyStart) throw err('assets.err.warranty');
+  return data;
+}
+export function assetDataOp(guid, patch) {
+  const data = checkData(patch);
+  return (ed) => {
+    const w = new ModelWriter(ed.W, ed.api, ed.mid);
+    return w.run(() => { const id = elementOf(w, guid); writeData(w, id, data); return { id }; });
+  };
+}
+/**
+ * Many assets at once, one undo step (a COBie spreadsheet read back): changes = [{ guid, data?: patch, docs?: [{ title,
+ * location, kind }] }]. Every patch and document is checked before anything is written; the first bad one throws with
+ * `row` set to its index.
+ */
+export function importOp(changes) {
+  const clean = changes.map((c, row) => {
+    try {
+      const docs = (c.docs || []).map((d) => { const loc = String(d.location ?? '').trim(), bad = docLocation(loc); if (bad) throw err(bad); return { loc, kind: DOC_KINDS.includes(d.kind) ? d.kind : 'other', name: clip(d.title) || clip(lastPart(loc)) }; });
+      return { guid: c.guid, data: c.data ? checkData(c.data) : null, docs };
+    } catch (e) { e.row = row; throw e; }
+  });
   return (ed) => {
     const w = new ModelWriter(ed.W, ed.api, ed.mid);
     return w.run(() => {
-      const id = elementOf(w, guid);
-      const bySet = new Map(), clear = new Map();
-      for (const [f, v] of Object.entries(data)) {
-        const [set, prop] = MAP[f];
-        if (v) { if (!bySet.has(set)) bySet.set(set, []); bySet.get(set).push([prop, ...typed(w, f, v)]); }
-        else { if (!clear.has(set)) clear.set(set, []); clear.get(set).push(prop); }
+      const ids2 = [];
+      for (const c of clean) {
+        const id = elementOf(w, c.guid);
+        if (c.data && Object.keys(c.data).length) writeData(w, id, c.data);
+        for (const d of c.docs) writeDoc(w, id, d);
+        ids2.push(id);
       }
-      for (const [set, rows] of bySet) { ownSet(w, id, set); w.upsertPset(id, set, rows); }
-      for (const [set, props] of clear) dropProps(w, id, set, props);
-      return { id };
+      return { id: ids2[0] ?? null, ids: ids2 };
     });
   };
 }
@@ -308,15 +367,68 @@ export function removeEntryOp(taskGuid) {
   return (ed) => { const w = new ModelWriter(ed.W, ed.api, ed.mid); return w.run(() => { dropTask(w, taskOf(w, taskGuid)); return {}; }); };
 }
 
+// ---- documents ----
+/** '' when s can be a document's place, else the error key: http(s) addresses, or a file name / path (C:\…, \\server\…, a/b.pdf). */
+export function docLocation(s) {
+  const v = String(s ?? '').trim();
+  if (!v) return 'assets.err.doc-location';
+  if (v.length > 255 || /[\u0000-\u001f\u007f]/.test(v)) return 'assets.err.doc-location';
+  if (/^[a-z]:[\\/]/i.test(v) || /^[\\/]{2}/.test(v)) return '';   // a drive letter or a network share: a file path
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(v);
+  if (!m) return '';
+  if (!/^https?$/i.test(m[1])) return 'assets.err.doc-scheme';
+  try { const u = new URL(v); return u.hostname && !u.username && !u.password ? '' : 'assets.err.doc-location'; } catch { return 'assets.err.doc-location'; }
+}
+export const openable = (s) => /^https?:\/\//i.test(String(s ?? '').trim()) && docLocation(s) === '';
+const lastPart = (s) => String(s).replace(/[?#].*$/, '').split(/[\\/]/).filter(Boolean).pop() || String(s);
+
+export function addDocOp(guid, { title = '', location = '', kind = 'other' } = {}) {
+  const loc = String(location ?? '').trim();
+  const bad = docLocation(loc);
+  if (bad) throw err(bad);
+  const d = { loc, kind: DOC_KINDS.includes(kind) ? kind : 'other', name: clip(title) || clip(lastPart(loc)) };
+  return (ed) => {
+    const w = new ModelWriter(ed.W, ed.api, ed.mid);
+    return w.run(() => { const id = elementOf(w, guid); return { id, ref: writeDoc(w, id, d) }; });
+  };
+}
+function writeDoc(w, id, { loc, kind, name }) {
+  const ref = w.v4
+    ? w.make('IFCDOCUMENTREFERENCE', w.T('IFCURIREFERENCE', loc), null, w.L(name), w.X(kind), null)
+    : w.make('IFCDOCUMENTREFERENCE', w.T('IFCLABEL', loc), null, w.L(name));
+  w.make('IFCRELASSOCIATESDOCUMENT', w.guid(), w.ownerHistory(), w.L(DOC_REL), w.X(kind), [w.H(id)], w.H(ref));
+  return ref;
+}
+/** Take a document off the element: out of the relation; the relation (and the reference, when nothing else uses it) go when emptied. */
+export function removeDocOp(guid, relGuid) {
+  return (ed) => {
+    const w = new ModelWriter(ed.W, ed.api, ed.mid);
+    return w.run(() => {
+      const id = elementOf(w, guid);
+      let rid = null;
+      for (const r of ids(w.api, w.mid, 'IFCRELASSOCIATESDOCUMENT')) { const l = w.api.GetLine(w.mid, r, false); if (l && val(l.GlobalId) === relGuid) { rid = r; break; } }
+      if (rid === null) throw err('assets.err.gone');
+      const rel = w.touch(rid), dref = rel.RelatingDocument?.value;
+      const keep = (rel.RelatedObjects || []).filter((h) => h.value !== id);
+      if (keep.length) { rel.RelatedObjects = keep; w.write(rel); return { id }; }
+      deleteLine(w.api, w.mid, rid);   // touched above: undo writes it back
+      const used = dref && ids(w.api, w.mid, 'IFCRELASSOCIATESDOCUMENT').some((r) => r !== rid && w.api.GetLine(w.mid, r, false)?.RelatingDocument?.value === dref);
+      if (dref && !used && /REFERENCE$/i.test(w.api.GetLine(w.mid, dref, false)?.constructor?.name || '')) w.dropTree(dref);
+      return { id };
+    });
+  };
+}
+
 // ---- CSV ----
 const cell = (v) => { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 export function assetsCsv(assets, { storeyName = () => '', head = null } = {}) {
-  const H = head || Object.fromEntries(['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes', 'asset', 'entry'].map((k) => [k, k]));   // the page passes `head` in the person's language
-  const cols = ['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes'];
+  const H = head || Object.fromEntries(['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes', 'asset', 'entry', 'document', 'location'].map((k) => [k, k]));   // the page passes `head` in the person's language
+  const cols = ['kind', 'name', 'tag', 'cls', 'storey', 'guid', ...FIELDS, 'last', 'next', 'work', 'by', 'notes', 'location'];
   const rows = [cols.map((c) => H[c])];
   for (const a of assets) {
-    rows.push([H.asset, a.name, a.tag, a.cls, storeyName(a.storey), a.guid, ...FIELDS.map((f) => a.data[f]), a.last, a.nextDue, '', '', '']);
-    for (const e of a.log) rows.push([H.entry, a.name, a.tag, a.cls, storeyName(a.storey), a.guid, ...FIELDS.map(() => ''), e.date, e.next, e.work, e.by, e.notes]);
+    rows.push([H.asset, a.name, a.tag, a.cls, storeyName(a.storey), a.guid, ...FIELDS.map((f) => a.data[f]), a.last, a.nextDue, '', '', '', '']);
+    for (const e of a.log) rows.push([H.entry, a.name, a.tag, a.cls, storeyName(a.storey), a.guid, ...FIELDS.map(() => ''), e.date, e.next, e.work, e.by, e.notes, '']);
+    for (const d of a.docs || []) rows.push([H.document, a.name, a.tag, a.cls, storeyName(a.storey), a.guid, ...FIELDS.map(() => ''), '', '', d.title, '', d.kind, d.location]);
   }
   return '﻿' + rows.map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n';
 }

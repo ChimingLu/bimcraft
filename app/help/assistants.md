@@ -19,10 +19,14 @@ How to let an AI assistant (any assistant that speaks MCP) look into the IFC mod
 | Describe the model, list walls | It gets the levels, walls, doors, windows, rooms, floors, grids and columns, and each wall's ends, type and height | Read |
 | Isolate, see-through, hide or show | The 3D view changes as if you had used the {{ui:Show}} menu | Change the view and draw |
 | Draw walls, doors, windows, floors, levels or grid lines | The model changes as if you had used the {{ui:Draw}} tools: walls join, rooms, floors and roofs follow | Change the view and draw |
+| Change a name or a property value | One element's Name, Description, Object type or Tag, or one property value. A value it shares with other elements is copied for it first; a value of its type changes only when the assistant says so, because every element of that type follows | Change the view and draw |
+| Move, delete, change walls, doors and windows | Elements move or are deleted with what they host; walls drawn with the {{ui:Draw}} tools change by their ends or type, doors and windows by their place, size or type, and rooms and joins follow | Change the view and draw |
 | Select elements, undo its own steps | Elements are picked in the view; its last step is taken back | Change the view and draw |
 | Save | A new IFC file with every change, as {{ui:Save as IFC}} makes it (the original is never changed) | Save |
+| Export USD | The open models as OpenUSD (.usda, .usdc or .usdz), as {{ui:USD}} on the toolbar writes it | Export |
+| Render a picture, run the render queue | A picture of the 3D view, as the {{ui:Render}} dialog makes it with your Render settings unless it asks for others, or high-quality pictures added to the dialog's queue and rendered one after another (the queue needs WebGPU). Nothing in the model changes ([Render a picture](topic:render)) | Export |
 
-Each change an assistant makes is one step in **Changes**, named "Assistant: …" (for example "Assistant: add 4 walls"), so {{key:Mod+Z}} takes back its whole action, and you can see whose step it was. It cannot delete or move what is there, and it cannot open files: you open the model; it works with the one that is open.
+Each change an assistant makes is one step in **Changes**, named "Assistant: …" (for example "Assistant: add 4 walls"), so {{key:Mod+Z}} takes back its whole action, and you can see whose step it was. In the window it cannot open files: you open the model; it works with the one that is open.
 
 ## Turn it on
 
@@ -53,6 +57,7 @@ Untick **Let AI assistants and scripts use BimCraft**. Every assistant is discon
 
 ## See also
 
+- [Recipes for AI assistants](common:assistants-recipes): worked examples, each with the tools it calls.
 - [Find elements by class, name or property](topic:find)
 - [Hide, isolate and see through elements](topic:hide-and-isolate)
 - [BimCraft settings](topic:settings)

@@ -35,6 +35,7 @@
 import * as THREE from 'three';
 import { QUALITY, SKIES, NIGHT, SHADOW_LAMPS, lampCandela, lampAt, lookFor, farPlane, basis, hemisphere, sunDisc, halton } from './looks.js';
 import { libMaterial, imageTextureReady, imageMaterial } from './three-mats.js';
+import { cameraStops } from './pt-camera.js';
 
 const quadVS = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
 
@@ -133,7 +134,7 @@ async function prepare(scene, settings, w, h) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;   // the softness comes from the accumulation, not the filter
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = Math.pow(2, settings.exposure || 0);
+  renderer.toneMappingExposure = Math.pow(2, cameraStops(settings));   // RN.4: the slider + the camera's f-stop, shutter, ISO
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.localClippingEnabled = !!(scene.clip && scene.clip.length);
   const disposables = [];

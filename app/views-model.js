@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+import { PLAN_DETAILS } from './wall-plan-graphics.js';
 /**
  * views-model.js — views the BIM way (0.6 DF.19, session `bim-draw`): each plan's view range and what it shows, view templates
  * that carry those settings, and sheets you arrange yourself. No DOM: bin/test-bimcraft.mjs --draw06 runs it in Node.
@@ -48,9 +49,9 @@ import { round } from './model-write.js';
 import { removeDraftingInViews } from './drafting.js';   // 0.6 DC.117 (d): a callout deleted takes its drafting with it
 
 export const PLANVIEW_PSET = 'CadCraft_PlanView', TEMPLATES_PSET = 'CadCraft_ViewTemplates', SHEETS_PSET = 'CadCraft_Sheets';
-export const RANGE_DEFAULTS = { cut: 1200, top: 0, bottom: 0, depth: 50, scale: 0 };
+export const RANGE_DEFAULTS = { cut: 1200, top: 0, bottom: 0, depth: 50, scale: 0, detail: 'coarse' };
 export const CEILINGPLAN_PSET = 'CadCraft_CeilingPlan';
-export const RCP_DEFAULTS = { cut: 2300, top: 0, bottom: 0, depth: 0, scale: 0 };   // 0.6 DC.117: looks up from 2300 mm (about 7'-6")
+export const RCP_DEFAULTS = { cut: 2300, top: 0, bottom: 0, depth: 0, scale: 0, detail: 'coarse' };   // 0.6 DC.117: looks up from 2300 mm (about 7'-6")
 const PSET_OF = { plan: PLANVIEW_PSET, rcp: CEILINGPLAN_PSET };
 export const SHEET_KINDS = ['plan', 'rcp', 'callout', 'elevation', 'section', 'schedule'];
 export const CALLOUTS_PSET = 'CadCraft_CalloutViews';   // 0.6 DC.117 (c)
@@ -78,7 +79,7 @@ export function readPlanViews(w, kind = 'plan') {
     out.set(l.id, {
       level: l.guid, kind, cut: fin(ps.Cut, D.cut / w.unitMm) * w.unitMm, top: fin(ps.Top, 0) * w.unitMm, bottom: fin(ps.Bottom, 0) * w.unitMm, depth: fin(ps.Depth, D.depth / w.unitMm) * w.unitMm,
       hiddenClasses: list(ps.HiddenClasses), hiddenGuids: list(ps.HiddenElements), template: String(ps.Template || ''),
-      scale: scaleOf(ps.Scale), crop: cropOf([ps.CropX0, ps.CropY0, ps.CropX1, ps.CropY1].map((v) => fin(v, 0) * w.unitMm)), underlay: String(ps.Underlay || ''),
+      detail: PLAN_DETAILS.includes(ps.Detail) ? ps.Detail : 'coarse', scale: scaleOf(ps.Scale), crop: cropOf([ps.CropX0, ps.CropY0, ps.CropX1, ps.CropY1].map((v) => fin(v, 0) * w.unitMm)), underlay: String(ps.Underlay || ''),
     });
   }
   return out;
@@ -88,7 +89,7 @@ export function readTemplates(w) {
   for (const [name, v] of Object.entries(ps || {})) {
     const t = json(v);
     if (!t) continue;
-    out.push({ name, cut: fin(t.cut, RANGE_DEFAULTS.cut), top: fin(t.top, 0), bottom: fin(t.bottom, 0), depth: fin(t.depth, RANGE_DEFAULTS.depth), hidden: Array.isArray(t.hidden) ? t.hidden.filter((c) => /^Ifc\w+$/.test(c)) : [], scale: scaleOf(t.scale) });
+    out.push({ name, cut: fin(t.cut, RANGE_DEFAULTS.cut), top: fin(t.top, 0), bottom: fin(t.bottom, 0), depth: fin(t.depth, RANGE_DEFAULTS.depth), hidden: Array.isArray(t.hidden) ? t.hidden.filter((c) => /^Ifc\w+$/.test(c)) : [], scale: scaleOf(t.scale), detail: PLAN_DETAILS.includes(t.detail) ? t.detail : 'coarse' });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -98,7 +99,8 @@ export function readSheets(w) {
     const s = json(v);
     if (!s || !/^sheet-\d+$/.test(id)) continue;
     out.push({ id, number: String(s.number || '').slice(0, 20), title: String(s.title || '').slice(0, 120), paper: String(s.paper || ''),
-      views: (Array.isArray(s.views) ? s.views : []).filter((x) => SHEET_KINDS.includes(x.kind) && typeof x.ref === 'string').map((x) => ({ kind: x.kind, ref: x.ref.slice(0, 64), x: fin(x.x, 0), y: fin(x.y, 0), ratio: Math.max(0, Math.round(fin(x.ratio, 0))) })) });
+      views: (Array.isArray(s.views) ? s.views : []).filter((x) => SHEET_KINDS.includes(x.kind) && typeof x.ref === 'string').map((x) => ({ kind: x.kind, ref: x.ref.slice(0, 64), x: fin(x.x, 0), y: fin(x.y, 0), ratio: Math.max(0, Math.round(fin(x.ratio, 0))) })),
+      legend: (Array.isArray(s.legend) ? s.legend : []).slice(0, 60).map((e, i) => ({ n: i + 1, kind: e.kind === 'classification' ? 'classification' : 'layer', key: String(e.key || '').slice(0, 80), text: String(e.text || e.key || '').slice(0, 160), count: Math.max(0, Math.round(fin(e.count, 0))) })).filter((e) => e.key) });
   }
   return out.sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }) || a.id.localeCompare(b.id));
 }
@@ -109,7 +111,7 @@ export function effectiveView(view, templates, levelHeight = 3000, kind = view?.
   const src = t || view || D;
   const top = (src.top || 0) > 0 ? src.top : levelHeight;
   return {
-    kind, cut: src.cut ?? D.cut, top, bottom: src.bottom ?? 0, depth: src.depth ?? RANGE_DEFAULTS.depth, scale: src.scale || 0,
+    kind, detail: src.detail || 'coarse', cut: src.cut ?? D.cut, top, bottom: src.bottom ?? 0, depth: src.depth ?? RANGE_DEFAULTS.depth, scale: src.scale || 0,
     crop: view?.crop || null, underlay: view?.underlay || '',
     hiddenClasses: new Set(t ? t.hidden : view?.hiddenClasses || []), hiddenGuids: new Set(view?.hiddenGuids || []), template: t ? t.name : '',
   };
@@ -130,6 +132,7 @@ export function setPlanView(levelGuid, ch, kind = 'plan') {
     if (c.template && !readTemplates(w).some((t) => t.name === c.template)) refuse('model.err.vr.template');
     if (kind === 'rcp' && !(nv.cut > 0)) refuse('model.err.vr.order');
     checkRange(nv, L.height);
+    if (!PLAN_DETAILS.includes(nv.detail)) refuse('model.err.vr.detail');
     if ('crop' in c && c.crop !== null && !cropOf(c.crop)) refuse('model.err.vr.crop');
     if ('scale' in c && !(Number.isFinite(Number(c.scale)) && Number(c.scale) >= 0 && Number(c.scale) <= 10000)) refuse('model.err.vr.scale');
     if (nv.underlay && (nv.underlay === levelGuid || !readLevels(w).some((l) => l.guid === nv.underlay))) refuse('model.err.vr.underlay');
@@ -139,7 +142,7 @@ export function setPlanView(levelGuid, ch, kind = 'plan') {
       ['Depth', 'IFCLENGTHMEASURE', round(w.u(nv.depth))], ['HiddenClasses', 'IFCTEXT', [...new Set(nv.hiddenClasses)].filter((x) => /^Ifc\w+$/.test(x)).join(',')],
       ['HiddenElements', 'IFCTEXT', [...new Set(nv.hiddenGuids)].join(',')], ['Template', 'IFCLABEL', nv.template || ''],
       ['Scale', 'IFCINTEGER', scaleOf(nv.scale)], ...['CropX0', 'CropY0', 'CropX1', 'CropY1'].map((k, i) => [k, 'IFCLENGTHMEASURE', round(w.u(crop[i]))]),
-      ['Underlay', 'IFCLABEL', nv.underlay || ''],
+      ['Underlay', 'IFCLABEL', nv.underlay || ''], ['Detail', 'IFCLABEL', nv.detail],
     ]);
     return { id: L.id, ids: [] };
   });
@@ -148,12 +151,13 @@ export function setPlanView(levelGuid, ch, kind = 'plan') {
 export function saveTemplate(t, oldName = null) {
   const T = { ...t, name: cleanName(t.name) };
   return op((w) => {
+    if (T.detail !== undefined && !PLAN_DETAILS.includes(T.detail)) refuse('model.err.vr.detail');
     if (!T.name) refuse('model.err.vr.name');
     const all = readTemplates(w);
     if (all.some((x) => x.name === T.name && x.name !== oldName)) refuse('model.err.vr.name');
     checkRange({ cut: fin(T.cut, 1200), top: fin(T.top, 0), bottom: fin(T.bottom, 0), depth: fin(T.depth, 50) });
     const pj = project(w);
-    const rows = [[T.name, 'IFCTEXT', JSON.stringify({ cut: fin(T.cut, 1200), top: fin(T.top, 0), bottom: fin(T.bottom, 0), depth: fin(T.depth, 50), hidden: (T.hidden || []).filter((c) => /^Ifc\w+$/.test(c)), scale: scaleOf(T.scale) })]];
+    const rows = [[T.name, 'IFCTEXT', JSON.stringify({ cut: fin(T.cut, 1200), top: fin(T.top, 0), bottom: fin(T.bottom, 0), depth: fin(T.depth, 50), hidden: (T.hidden || []).filter((c) => /^Ifc\w+$/.test(c)), scale: scaleOf(T.scale), detail: T.detail || 'coarse' })]];
     if (oldName && oldName !== T.name) {
       rows.push([oldName, 'IFCTEXT', '']);
       // views that used the old name follow the new one
@@ -171,7 +175,7 @@ export function deleteTemplate(name) {
     // views that used it keep its settings as their own
     for (const [lid, v] of readPlanViews(w)) if (v.template === name) {
       w.upsertPset(lid, PLANVIEW_PSET, [['Cut', 'IFCLENGTHMEASURE', round(w.u(t.cut))], ['Top', 'IFCLENGTHMEASURE', round(w.u(t.top))], ['Bottom', 'IFCLENGTHMEASURE', round(w.u(t.bottom))],
-        ['Depth', 'IFCLENGTHMEASURE', round(w.u(t.depth))], ['HiddenClasses', 'IFCTEXT', t.hidden.join(',')], ['Scale', 'IFCINTEGER', t.scale || 0], ['Template', 'IFCLABEL', '']]);
+        ['Depth', 'IFCLENGTHMEASURE', round(w.u(t.depth))], ['HiddenClasses', 'IFCTEXT', t.hidden.join(',')], ['Scale', 'IFCINTEGER', t.scale || 0], ['Template', 'IFCLABEL', ''], ['Detail', 'IFCLABEL', t.detail || 'coarse']]);
     }
     w.upsertPset(project(w), TEMPLATES_PSET, [[name, 'IFCTEXT', '']]);
     return { id: null, ids: [] };
@@ -185,7 +189,7 @@ export function saveSheet(sheet) {
     const pj = project(w);
     if (!fixed) { const have = readSheets(w); let n = 1; while (have.some((x) => x.id === 'sheet-' + n)) n++; fixed = 'sheet-' + n; }
     const views = (S.views || []).filter((x) => SHEET_KINDS.includes(x.kind)).map((x) => ({ kind: x.kind, ref: String(x.ref), x: round(fin(x.x, 0), 2), y: round(fin(x.y, 0), 2), ratio: Math.max(0, Math.round(fin(x.ratio, 0))) }));
-    w.upsertPset(pj, SHEETS_PSET, [[fixed, 'IFCTEXT', JSON.stringify({ number: String(S.number || '').slice(0, 20), title: String(S.title || '').slice(0, 120), paper: String(S.paper || ''), views })]]);
+    w.upsertPset(pj, SHEETS_PSET, [[fixed, 'IFCTEXT', JSON.stringify({ number: String(S.number || '').slice(0, 20), title: String(S.title || '').slice(0, 120), paper: String(S.paper || ''), views, ...(S.legend?.length ? { legend: S.legend.slice(0, 60).map((e) => ({ kind: e.kind, key: String(e.key).slice(0, 80), text: String(e.text || '').slice(0, 160), count: Math.round(fin(e.count, 0)) })) } : {}) })]]);
     return { id: pj, ids: [], sheet: fixed };
   });
 }
