@@ -65,7 +65,7 @@ $__build = [
     'url' => $R . 'assets/apps/' . $app['slug'] . '/' . $__ver . '/', 'is_dev' => $__ver === 'dev', 'is_current' => $edition !== null, 'current' => $edition,
     'manifest' => $__manifest, 'release' => null,
 ];
-Lang::use($__build, $lang !== null && Lang::validLocale($lang) ? $lang : 'en');
+Lang::use($__build, $lang !== null && Lang::validLocale($lang) ? $lang : 'zh-TW');
 
 $imports = [];
 foreach ($__manifest['imports'] ?? [] as $spec => $path) $imports[$spec] = $path;
