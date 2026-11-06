@@ -33,6 +33,22 @@ npm test                    # the app's tests; libraries are fetched by exact ve
 
 `app/` is the code in development (the same code on every platform; each release is a tag), `web/` `windows/` `linux/` `macos/` `ios/` `android/` hold what ships or builds it on each, `devshell/` runs it without the website (`devshell/README.md`), `tests/` and `fixtures/` are its tests and public sample files. How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md); building from source: [BUILDING.md](BUILDING.md).
 
+## Repo map (for developers and AI agents)
+
+This repository is one part of the CadCraft build chain:
+
+- `bimcraft` (this repo): the app code and app-owned add-ons (`app/addons/`, including `visual-script`).
+- `studio` repo: packs multiple app browser editions into one Studio suite (`pack/suite.mjs`).
+- `desktop-shell` repo: turns one browser edition (or one Studio suite) into desktop installers/app bundles.
+- `language-packs` repo: translation layers for apps, Studio and add-ons.
+- `addons` repo: add-on authoring docs/templates/examples for external add-ons.
+
+Typical flow:
+
+1. Build BimCraft browser edition here (`node devshell/edition.mjs`).
+2. Optionally compose a Studio suite in the `studio` repo.
+3. Package desktop app/installer in `desktop-shell` with `--edition`.
+
 ## License
 
 Apache License 2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)). Libraries and their licenses: [THIRD_PARTY.md](THIRD_PARTY.md). Where the code comes from: [PROVENANCE.md](PROVENANCE.md). The names are trademarks; a fork must rename: [TRADEMARKS.md](TRADEMARKS.md).
